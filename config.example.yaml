@@ -1,0 +1,24 @@
+poll_interval_seconds: 300
+discovery_prefix: homeassistant
+state_prefix: reolink_monitor
+
+mqtt:
+  host: "${MQTT_HOST}"
+  port: "${MQTT_PORT}"
+  username: "${MQTT_USERNAME}"
+  password: "${MQTT_PASSWORD}"
+  client_id: reolink_monitor
+  # Enable verified TLS; certificate verification is enabled by default.
+  tls: false
+  # Set one of these to a PEM broker certificate or CA certificate.
+  # Paths are relative to this config file when not absolute.
+  # server_cert: certs/mqtt-server.pem
+  # ca_cert: certs/mqtt-ca.pem
+
+cameras:
+  - name: Garden Camera
+    host: "${CAMERA_HOST}"
+    username: "${CAMERA_USERNAME}"
+    password: "${CAMERA_PASSWORD}"
+    port: 9000
+    channel: 0

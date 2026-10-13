@@ -1,0 +1,11 @@
+.env
+config.yaml
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.egg-info/
+argos_recordings.sqlite
+build/
+dist/
