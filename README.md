@@ -15,6 +15,25 @@ Monitor Reolink cameras through [`reolink-aio`](https://github.com/starkillerOG/
 
 The dev container forwards port 1883 for a broker running on the host. Change `MQTT_HOST` in `.env` if your broker is elsewhere. Reolink credentials and MQTT credentials should be supplied through environment variables, not committed in the YAML file.
 
+## Run with Docker
+
+Build the image locally:
+
+```sh
+docker build -t reolink-monitor .
+```
+
+Mount your configuration file and environment file when starting the container:
+
+```sh
+docker run --rm \
+  --env-file .env \
+  -v "$PWD/config.yaml:/config/config.yaml:ro" \
+  reolink-monitor
+```
+
+The image is published to `ghcr.io/poggenpower/py_reolink_monitor`. Version-tagged commits use their tag (for example, `v1.2.3`); other builds use the most recent reachable version tag followed by the GitHub Actions build number. Builds from branches other than the repository's default branch include a normalized branch name in the image version.
+
 ## Stdout mode
 
 To emit the Home Assistant discovery configuration and camera state records as JSON Lines instead of connecting to MQTT, run:
