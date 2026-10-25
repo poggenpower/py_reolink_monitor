@@ -48,6 +48,7 @@ class AppConfig:
     poll_interval_seconds: int = 300
     discovery_prefix: str = "homeassistant"
     state_prefix: str = "reolink_monitor"
+    recent_recordings_lookback_minutes: int = 1440
 
 
 def _expand_environment(value: Any) -> Any:
@@ -162,10 +163,18 @@ def load_config(path: str | Path, *, require_mqtt: bool = True) -> AppConfig:
         uid = camera.get("uid")
         if uid is not None:
             uid = _require_nonempty_string(uid, f"cameras[{index}].uid")
+        use_udp = _boolean(camera.get("udp", False), f"cameras[{index}].udp")
         udp_local_port = camera.get("udp_local_port", camera.get("local_port", 44230))
         retry_attempts = camera.get("retry_attempts", 3)
         retry_wait_seconds = camera.get("retry_wait_seconds", 20.0)
         connection_timeout_seconds = camera.get("connection_timeout_seconds", 60.0)
+        udp_local_port = _integer(
+            udp_local_port, f"cameras[{index}].udp_local_port", 0
+        )
+        if use_udp and udp_local_port == 0:
+            raise ValueError(
+                f"'cameras[{index}].udp_local_port' must be a fixed port greater than 0"
+            )
         cameras.append(
             CameraConfig(
                 name=_require_nonempty_string(camera.get("name"), f"cameras[{index}].name"),
@@ -179,8 +188,8 @@ def load_config(path: str | Path, *, require_mqtt: bool = True) -> AppConfig:
                 port=_integer(camera.get("port", 9000), f"cameras[{index}].port", 1),
                 channel=_integer(camera.get("channel", 0), f"cameras[{index}].channel", 0),
                 uid=uid,
-                use_udp=_boolean(camera.get("udp", False), f"cameras[{index}].udp"),
-                udp_local_port=_integer(udp_local_port, f"cameras[{index}].udp_local_port", 0),
+                use_udp=use_udp,
+                udp_local_port=udp_local_port,
                 retry_attempts=_integer(retry_attempts, f"cameras[{index}].retry_attempts", 1),
                 retry_wait_seconds=_float(
                     retry_wait_seconds, f"cameras[{index}].retry_wait_seconds", 0.0
@@ -200,6 +209,11 @@ def load_config(path: str | Path, *, require_mqtt: bool = True) -> AppConfig:
     poll_interval = _integer(
         raw.get("poll_interval_seconds", 300), "poll_interval_seconds", 1
     )
+    recent_recordings_lookback_minutes = _integer(
+        raw.get("recent_recordings_lookback_minutes", 1440),
+        "recent_recordings_lookback_minutes",
+        1,
+    )
     discovery_prefix = _require_nonempty_string(
         raw.get("discovery_prefix", "homeassistant"), "discovery_prefix"
     )
@@ -210,6 +224,7 @@ def load_config(path: str | Path, *, require_mqtt: bool = True) -> AppConfig:
         mqtt=mqtt,
         cameras=tuple(cameras),
         poll_interval_seconds=poll_interval,
+        recent_recordings_lookback_minutes=recent_recordings_lookback_minutes,
         discovery_prefix=discovery_prefix.strip("/"),
         state_prefix=state_prefix.strip("/"),
     )

@@ -37,6 +37,7 @@ def test_load_config_resolves_environment_and_parses_camera(tmp_path, monkeypatc
     assert config.cameras[0].host == "192.0.2.12"
     assert config.cameras[0].channel == 0
     assert config.poll_interval_seconds == 300
+    assert config.recent_recordings_lookback_minutes == 1440
     assert config.mqtt.client_id == "reolink_monitor"
     assert config.state_prefix == "reolink_monitor"
     assert "secret" not in repr(config)
@@ -111,6 +112,52 @@ def test_config_rejects_empty_camera_list(tmp_path):
         load_config(path)
 
 
+def test_load_config_parses_recent_recordings_lookback_minutes(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """
+            recent_recordings_lookback_minutes: 90
+            mqtt:
+              host: mqtt.local
+            cameras:
+              - name: Side Gate
+                host: 192.0.2.12
+                username: admin
+                password: secret
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.recent_recordings_lookback_minutes == 90
+
+
+@pytest.mark.parametrize("lookback", [0, -1, "invalid"])
+def test_config_rejects_invalid_recent_recordings_lookback_minutes(tmp_path, lookback):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            recent_recordings_lookback_minutes: {lookback}
+            mqtt:
+              host: mqtt.local
+            cameras:
+              - name: Side Gate
+                host: 192.0.2.12
+                username: admin
+                password: secret
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="recent_recordings_lookback_minutes"):
+        load_config(path)
+
+
 def test_load_config_parses_udp_recovery_settings(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(
@@ -145,6 +192,29 @@ def test_load_config_parses_udp_recovery_settings(tmp_path):
     assert camera.retry_attempts == 5
     assert camera.retry_wait_seconds == 15.0
     assert camera.connection_timeout_seconds == 45.0
+
+
+def test_config_rejects_ephemeral_udp_local_port(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """
+            mqtt:
+              host: localhost
+            cameras:
+              - name: Garden
+                host: 192.0.2.20
+                username: admin
+                password: secret
+                udp: true
+                udp_local_port: 0
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="udp_local_port"):
+        load_config(path)
 
 
 def test_stdout_mode_config_does_not_require_mqtt_environment(tmp_path, monkeypatch):

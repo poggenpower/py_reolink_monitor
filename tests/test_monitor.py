@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from xml.etree import ElementTree as XML
 
 import pytest
 
+from reolink_monitor import monitor as monitor_module
 from reolink_monitor.config import AppConfig, CameraConfig, MqttConfig
-from reolink_monitor.monitor import _FILE_INFO_PAGE_SIZE, BatteryMonitor
+from reolink_monitor.monitor import (
+    _FILE_INFO_PAGE_SIZE,
+    BatteryMonitor,
+    _pin_udp_port,
+)
 
 
 class FakePublisher:
@@ -140,6 +146,34 @@ def configured_monitor(host: FakeHost) -> tuple[BatteryMonitor, FakePublisher]:
     return monitor, publisher
 
 
+def test_udp_connection_uses_each_camera_fixed_local_port(monkeypatch):
+    import reolink_aio.baichuan.baichuan as bc_module
+
+    class FakeUdpConnection:
+        def __init__(self, host, port=0, *args, **kwargs):
+            self.host = host
+            self.port = port
+
+    monkeypatch.setattr(bc_module, "BaichuanUdpConnection", FakeUdpConnection)
+    monkeypatch.setattr(monitor_module, "_UDP_CONNECTION_PATCHED", False)
+
+    _pin_udp_port()
+    patched_class = bc_module.BaichuanUdpConnection
+    _pin_udp_port()
+    assert bc_module.BaichuanUdpConnection is patched_class
+
+    ports = []
+    for configured_port in (44230, 44231):
+        token = monitor_module._UDP_LOCAL_PORT.set(configured_port)
+        try:
+            ports.append(bc_module.BaichuanUdpConnection("camera", 0).port)
+        finally:
+            monitor_module._UDP_LOCAL_PORT.reset(token)
+
+    assert ports == [44230, 44231]
+    assert bc_module.BaichuanUdpConnection("camera", 12345).port == 12345
+
+
 @pytest.mark.asyncio
 async def test_poll_publishes_battery_and_charging_status_and_logs_out():
     host = FakeHost()
@@ -194,11 +228,13 @@ async def test_failed_camera_poll_marks_camera_offline():
     assert publisher.messages[-1][1] == "offline"
 
 
-def test_discovery_announces_battery_entity_with_ha_device_metadata():
+def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     monitor, publisher = configured_monitor(FakeHost())
 
-    monitor.publish_discovery()
+    with caplog.at_level(logging.INFO, logger="reolink_monitor.monitor"):
+        monitor.publish_discovery()
 
+    assert "Home Assistant MQTT discovery for 1 cameras (3 entities)" in caplog.text
     battery_topic, battery_payload, retained = publisher.messages[0]
     discovery = json.loads(battery_payload)
     assert battery_topic == (
@@ -221,7 +257,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata():
 
 
 @pytest.mark.asyncio
-async def test_poll_publishes_latest_ten_unique_recordings():
+async def test_poll_publishes_total_recording_count_and_latest_ten_details(caplog):
     now = datetime.now(UTC)
     recordings = [
         SimpleNamespace(
@@ -241,10 +277,14 @@ async def test_poll_publishes_latest_ten_unique_recordings():
     )
     monitor, publisher = configured_monitor(host)
 
-    await monitor.poll_camera(monitor._config.cameras[0])
+    with caplog.at_level(logging.DEBUG, logger="reolink_monitor.monitor"):
+        await monitor.poll_camera(monitor._config.cameras[0])
 
     state = {topic.rsplit("/", 1)[-1]: payload for topic, payload, _ in publisher.messages}
-    assert state["recent_recordings"] == "10"
+    assert state["recent_recordings"] == str(len(recordings))
+    assert "52 unique clips within the last 1440 minutes; publishing details for 10" in caplog.text
+    assert "clip_51.mp4" in caplog.text
+    assert "clip_41.mp4" not in caplog.text
     attributes = json.loads(state["attributes"])
     assert len(attributes["recordings"]) == 10
     assert attributes["recordings"][0]["file_name"] == "clip_51.mp4"
@@ -253,6 +293,30 @@ async def test_poll_publishes_latest_ten_unique_recordings():
     command_ids = [cmd_id for cmd_id, _ in host.baichuan.commands]
     assert command_ids[:4] == [14, 15, 15, 16]
     assert command_ids[-3:] == [14, 15, 16]
+
+
+@pytest.mark.asyncio
+async def test_recording_search_uses_configured_lookback_window(monkeypatch):
+    monitor, publisher = configured_monitor(FakeHost())
+    monitor._config = AppConfig(
+        mqtt=MqttConfig(host="localhost"),
+        cameras=monitor._config.cameras,
+        recent_recordings_lookback_minutes=37,
+    )
+    searched = {}
+
+    async def search(_host, _camera, start, end):
+        searched["start"] = start
+        searched["end"] = end
+        return []
+
+    monkeypatch.setattr("reolink_monitor.monitor._search_file_info_recordings", search)
+    await monitor._publish_recent_recordings(
+        FakeHost(), monitor._config.cameras[0], "reolink_monitor/garden_ch0"
+    )
+
+    assert searched["end"] - searched["start"] == timedelta(minutes=37)
+    assert publisher.messages[-2][1] == "0"
 
 
 @pytest.mark.asyncio

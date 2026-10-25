@@ -1,4 +1,5 @@
 poll_interval_seconds: 300
+recent_recordings_lookback_minutes: 1440
 discovery_prefix: homeassistant
 state_prefix: reolink_monitor
 
@@ -22,3 +23,6 @@ cameras:
     password: "${CAMERA_PASSWORD}"
     port: 9000
     channel: 0
+    # Enable Baichuan UDP with a fixed local port (1-65535).
+    # udp: true
+    # udp_local_port: 44230

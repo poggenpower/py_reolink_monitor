@@ -7,6 +7,7 @@ import inspect
 import json
 import logging
 import re
+from contextvars import ContextVar
 from datetime import datetime, time, timedelta, tzinfo
 from typing import Protocol
 from xml.etree import ElementTree as XML
@@ -19,7 +20,8 @@ from .config import AppConfig, CameraConfig
 
 _LOGGER = logging.getLogger(__name__)
 _BATTERY_STATUS = {0: "discharging", 1: "charging", 2: "charged"}
-_RECORDING_LOOKBACK = timedelta(hours=24)
+_UDP_LOCAL_PORT: ContextVar[int | None] = ContextVar("baichuan_udp_local_port", default=None)
+_UDP_CONNECTION_PATCHED = False
 _RECENT_RECORDING_LIMIT = 10
 _RECORDING_STREAM = "main"
 _FILE_INFO_PAGE_SIZE = 40
@@ -257,18 +259,23 @@ def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
 
-def _pin_udp_port(port: int) -> None:
-    if port <= 0:
+def _pin_udp_port() -> None:
+    global _UDP_CONNECTION_PATCHED
+    if _UDP_CONNECTION_PATCHED:
         return
     import reolink_aio.baichuan.baichuan as bc_module
 
     base = bc_module.BaichuanUdpConnection
 
     class FixedPortUdpConnection(base):  # type: ignore[misc, valid-type]
-        def __init__(self, host, _random_port=0, *args, **kwargs):
-            super().__init__(host, port, *args, **kwargs)
+        def __init__(self, host, port=0, *args, **kwargs):
+            local_port = _UDP_LOCAL_PORT.get()
+            super().__init__(
+                host, port if local_port is None else local_port, *args, **kwargs
+            )
 
     bc_module.BaichuanUdpConnection = FixedPortUdpConnection
+    _UDP_CONNECTION_PATCHED = True
 
 
 class BatteryMonitor:
@@ -286,6 +293,11 @@ class BatteryMonitor:
         return f"{_slug(camera.name)}_ch{camera.channel}"
 
     def publish_discovery(self) -> None:
+        _LOGGER.info(
+            "Publishing Home Assistant MQTT discovery for %d cameras (%d entities)",
+            len(self._config.cameras),
+            len(self._config.cameras) * 3,
+        )
         for camera in self._config.cameras:
             identity = self._identity(camera)
             state_root = f"{self._config.state_prefix}/{identity}"
@@ -351,7 +363,7 @@ class BatteryMonitor:
         if camera.use_udp:
             kwargs["bc_connection"] = ConnectionEnum.udp
             kwargs["bc_only"] = True
-            _pin_udp_port(camera.udp_local_port)
+            _pin_udp_port()
         elif camera.uid:
             kwargs["bc_only"] = True
 
@@ -381,7 +393,16 @@ class BatteryMonitor:
                     attempt,
                     camera.retry_attempts,
                 )
-                await asyncio.wait_for(host.get_host_data(), timeout=camera.connection_timeout_seconds)
+                token = (
+                    _UDP_LOCAL_PORT.set(camera.udp_local_port) if camera.use_udp else None
+                )
+                try:
+                    await asyncio.wait_for(
+                        host.get_host_data(), timeout=camera.connection_timeout_seconds
+                    )
+                finally:
+                    if token is not None:
+                        _UDP_LOCAL_PORT.reset(token)
                 return host
             except (ReolinkError, TimeoutError, OSError) as err:
                 last_error = err
@@ -423,7 +444,7 @@ class BatteryMonitor:
     ) -> None:
         # The camera can timestamp clips a few minutes ahead of this host.
         end = datetime.now(host.timezone()) + timedelta(minutes=5)
-        start = end - _RECORDING_LOOKBACK
+        start = end - timedelta(minutes=self._config.recent_recordings_lookback_minutes)
         _LOGGER.debug(
             "%s searching recordings for channel %d stream %s from %s to %s",
             camera.name,
@@ -443,14 +464,18 @@ class BatteryMonitor:
             )
             return
 
-        _LOGGER.info(
-            "%s recording search returned %d unique clips",
-            camera.name,
-            len(recordings),
-        )
+        total_count = len(recordings)
         recent = sorted(
             recordings, key=lambda recording: recording.start_time, reverse=True
         )[:_RECENT_RECORDING_LIMIT]
+        _LOGGER.info(
+            "%s recording search returned %d unique clips within the last %d minutes; "
+            "publishing details for %d",
+            camera.name,
+            total_count,
+            self._config.recent_recordings_lookback_minutes,
+            len(recent),
+        )
         recordings = [
             {
                 "file_name": recording.file_name,
@@ -461,7 +486,10 @@ class BatteryMonitor:
             for recording in recent
         ]
         _LOGGER.debug("%s recent recordings: %s", camera.name, recordings)
-        self._publisher.publish(f"{state_root}/recent_recordings", str(len(recordings)))
+        self._publisher.publish(
+            f"{state_root}/recent_recordings",
+            str(total_count),
+        )
         self._publisher.publish(
             f"{state_root}/recent_recordings/attributes",
             json.dumps({"recordings": recordings}),
