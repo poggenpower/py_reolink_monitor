@@ -12,3 +12,4 @@
 ### Fixed
 
 - Honor each camera's configured UDP port without allowing one camera's port to affect another camera's connection.
+- Qualify published container tags with the GHCR image name so pushes target GitHub Container Registry.

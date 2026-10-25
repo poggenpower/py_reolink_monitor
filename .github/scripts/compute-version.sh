@@ -37,7 +37,17 @@ else
     tags="$version"
 fi
 
+image_name="$(printf '%s' "${IMAGE_NAME:?IMAGE_NAME must be set}" | tr '[:upper:]' '[:lower:]')"
+image_tags=""
+while IFS= read -r tag; do
+    [[ -z "$tag" ]] && continue
+    if [[ -n "$image_tags" ]]; then
+        image_tags+=$'\n'
+    fi
+    image_tags+="${image_name}:$tag"
+done <<< "$tags"
+
 {
     printf 'version=%s\n' "$version"
-    printf 'tags<<EOF\n%s\nEOF\n' "$tags"
+    printf 'tags<<EOF\n%s\nEOF\n' "$image_tags"
 } >> "${GITHUB_OUTPUT:-/dev/stdout}"
