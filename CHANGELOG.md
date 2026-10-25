@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Validate commit subjects against the `[feat]`, `[fix]`, `[docs]`, and `[chore]` prefixes.
+- Generate release changelog entries from commit subjects when a version tag is pushed.
+
+### Documentation
+
+- Document fixed UDP port publishing for Docker bridge networking.
+
 ## 0.1.0 - 2026-10-25
 
 ### Added
