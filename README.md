@@ -34,7 +34,7 @@ docker run --rm \
 
 When using Baichuan UDP, enable `udp: true` and configure a fixed, unique `udp_local_port` for each camera. With Docker's default bridge networking, publish each configured UDP port to the container using `-p HOST_PORT:CONTAINER_PORT/udp` (for example, add `-p 44230:44230/udp` to `docker run`). The host and container ports should match the camera's configured local port. If running with host networking, port publishing is not needed.
 
-The image is published to `ghcr.io/poggenpower/py_reolink_monitor`. Version-tagged commits use their tag (for example, `v1.2.3`); other builds use the most recent reachable version tag followed by the GitHub Actions build number. Builds from branches other than the repository's default branch include a normalized branch name in the image version. Pushing a version tag also updates `CHANGELOG.md` on the default branch from commit messages since the previous version tag.
+The image is published to `ghcr.io/poggenpower/py_reolink_monitor` for both `linux/amd64` and `linux/arm64`; Docker selects the matching architecture when pulling. Version-tagged commits use their tag (for example, `v1.2.3`); other builds use the most recent reachable version tag followed by the GitHub Actions build number. Builds from branches other than the repository's default branch include a normalized branch name in the image version. Pushing a version tag also updates `CHANGELOG.md` on the default branch from commit messages since the previous version tag.
 
 ## Commit messages
 

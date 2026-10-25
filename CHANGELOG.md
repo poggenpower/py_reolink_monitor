@@ -6,6 +6,7 @@
 
 - Validate commit subjects against the `[feat]`, `[fix]`, `[docs]`, and `[chore]` prefixes.
 - Generate release changelog entries from commit subjects when a version tag is pushed.
+- Build container images for both amd64 and arm64 platforms.
 
 ### Documentation
 
