@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reolink-monitor
+  labels:
+    app.kubernetes.io/name: reolink-monitor
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: reolink-monitor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: reolink-monitor
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: reolink-monitor
+          image: ghcr.io/poggenpower/py_reolink_monitor:0.1.0-build.4
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: reolink-monitor-credentials
+          ports:
+            - name: camera-udp-1
+              containerPort: 44230
+              protocol: UDP
+            - name: camera-udp-2
+              containerPort: 44231
+              protocol: UDP
+          volumeMounts:
+            - name: config
+              mountPath: /config/config.yaml
+              subPath: config.yaml
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: reolink-monitor-config

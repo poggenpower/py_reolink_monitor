@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: reolink-monitor-udp
+  labels:
+    app.kubernetes.io/name: reolink-monitor
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app.kubernetes.io/name: reolink-monitor
+  ports:
+    - name: camera-udp-1
+      protocol: UDP
+      port: 44230
+      targetPort: 44230
+    - name: camera-udp-2
+      protocol: UDP
+      port: 44231
+      targetPort: 44231
