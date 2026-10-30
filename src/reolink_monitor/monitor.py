@@ -56,7 +56,13 @@ class Publisher(Protocol):
     def publish(self, topic: str, payload: str, retain: bool = True) -> None: ...
 
 
+class BaichuanConnection(Protocol):
+    async def close(self) -> None: ...
+
+
 class BaichuanApi(Protocol):
+    _connection: BaichuanConnection | None
+
     async def send(self, cmd_id: int, body: str = "") -> str: ...
 
 
@@ -355,6 +361,13 @@ class BatteryMonitor:
             await host.logout()
         except (AttributeError, OSError, ReolinkError, TimeoutError, TypeError) as err:
             _LOGGER.debug("logout failed: %s", err)
+        finally:
+            connection = host.baichuan._connection
+            if connection is not None:
+                try:
+                    await connection.close()
+                except (OSError, ReolinkError, TimeoutError) as err:
+                    _LOGGER.warning("Baichuan connection cleanup failed: %s", err)
 
     async def _connect_camera(self, camera: CameraConfig) -> CameraHost:
         kwargs: dict[str, object] = {"timeout": camera.connection_timeout_seconds}
@@ -412,9 +425,14 @@ class BatteryMonitor:
                     wait = camera.retry_wait_seconds * attempt
                     _LOGGER.info("Waiting %.0f s before retry for %s", wait, camera.name)
                     await asyncio.sleep(wait)
+        error_detail = (
+            f"{type(last_error).__name__}: {last_error}"
+            if last_error is not None
+            else "unknown error"
+        )
         raise ConnectionError(
             f"Camera {camera.name} not reachable after {camera.retry_attempts} attempts: "
-            f"{last_error or 'unknown error'}"
+            f"{error_detail}"
         )
 
     async def poll_camera(self, camera: CameraConfig) -> None:

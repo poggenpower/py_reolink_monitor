@@ -12,6 +12,10 @@
 
 - Document fixed UDP port publishing for Docker bridge networking.
 
+### Fixed
+
+- Close Baichuan connections after failed attempts so timed-out UDP sockets do not remain bound and block retries.
+
 ## 0.1.0 - 2026-10-25
 
 ### Added

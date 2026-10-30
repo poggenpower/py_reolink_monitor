@@ -72,6 +72,7 @@ class FakeBaichuan:
         self.pages = list(pages or [])
         self.error = error
         self.commands: list[tuple[int, str]] = []
+        self._connection = None
 
     async def send(self, cmd_id, body=""):
         self.commands.append((cmd_id, body))
@@ -84,6 +85,14 @@ class FakeBaichuan:
                 return self.pages.pop(0)
             return "<body><FileInfoList /></body>"
         return "<body />"
+
+
+class FakeUdpConnection:
+    def __init__(self):
+        self.closed = False
+
+    async def close(self):
+        self.closed = True
 
 
 def file_info_page(recordings):
@@ -172,6 +181,41 @@ def test_udp_connection_uses_each_camera_fixed_local_port(monkeypatch):
 
     assert ports == [44230, 44231]
     assert bc_module.BaichuanUdpConnection("camera", 12345).port == 12345
+
+
+@pytest.mark.asyncio
+async def test_failed_connection_closes_udp_socket_before_retry():
+    host = FakeHost()
+    connection = FakeUdpConnection()
+    host.baichuan._connection = connection
+    calls = 0
+
+    async def get_host_data():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError()
+        assert connection.closed
+
+    host.get_host_data = get_host_data
+    monitor, _ = configured_monitor(host)
+    camera = monitor._config.cameras[0]
+    camera = CameraConfig(
+        name=camera.name,
+        host=camera.host,
+        username=camera.username,
+        password=camera.password,
+        port=camera.port,
+        channel=camera.channel,
+        retry_attempts=2,
+        retry_wait_seconds=0,
+    )
+
+    connected_host = await monitor._connect_camera(camera)
+
+    assert connected_host is host
+    assert calls == 2
+    assert connection.closed
 
 
 @pytest.mark.asyncio
