@@ -307,7 +307,7 @@ class BatteryMonitor:
         for camera in self._config.cameras:
             identity = self._identity(camera)
             state_root = f"{self._config.state_prefix}/{identity}"
-            availability_topic = f"{state_root}/availability"
+            availability_topic = f"{self._config.state_prefix}/availability"
             device = {
                 "identifiers": [f"reolink_monitor_{identity}"],
                 "manufacturer": "Reolink",
@@ -354,7 +354,20 @@ class BatteryMonitor:
                     "expire_after": self._config.poll_interval_seconds * 3,
                     **attributes,
                 }
-                self._publisher.publish(topic, json.dumps(payload))
+                self._publisher.publish(topic, json.dumps(payload), retain=True)
+
+    def publish_metadata(self) -> None:
+        metadata_root = f"{self._config.state_prefix}/metadata"
+        self._publisher.publish(
+            f"{metadata_root}/recent_recordings_lookback_minutes",
+            str(self._config.recent_recordings_lookback_minutes),
+            retain=True,
+        )
+        self._publisher.publish(
+            f"{metadata_root}/poll_interval_seconds",
+            str(self._config.poll_interval_seconds),
+            retain=True,
+        )
 
     async def _safe_logout(self, host: CameraHost) -> None:
         try:
@@ -443,16 +456,28 @@ class BatteryMonitor:
             status_code = host.battery_status(camera.channel)
             identity = self._identity(camera)
             state_root = f"{self._config.state_prefix}/{identity}"
-            self._publisher.publish(f"{state_root}/availability", "online")
             if percentage is None:
                 battery = "unknown"
                 status = "unknown"
             else:
                 battery = str(percentage)
                 status = _BATTERY_STATUS.get(status_code, "unknown")
-            self._publisher.publish(f"{state_root}/battery", battery)
-            self._publisher.publish(f"{state_root}/battery_status", status)
+            self._publisher.publish(f"{state_root}/battery", battery, retain=False)
+            self._publisher.publish(
+                f"{state_root}/battery_status", status, retain=False
+            )
             await self._publish_recent_recordings(host, camera, state_root)
+            scraped_at = datetime.now().astimezone()
+            self._publisher.publish(
+                f"{state_root}/scraped_at_iso",
+                scraped_at.isoformat(),
+                retain=False,
+            )
+            self._publisher.publish(
+                f"{state_root}/scraped_at_unix",
+                str(int(scraped_at.timestamp())),
+                retain=False,
+            )
             _LOGGER.info("%s battery=%s%% status=%s", camera.name, battery, status)
         finally:
             await self._safe_logout(host)
@@ -475,10 +500,13 @@ class BatteryMonitor:
             recordings = await _search_file_info_recordings(host, camera, start, end)
         except (ReolinkError, OSError, TimeoutError) as err:
             _LOGGER.warning("Could not list recent recordings for %s: %s", camera.name, err)
-            self._publisher.publish(f"{state_root}/recent_recordings", "unknown")
+            self._publisher.publish(
+                f"{state_root}/recent_recordings", "unknown", retain=False
+            )
             self._publisher.publish(
                 f"{state_root}/recent_recordings/attributes",
                 json.dumps({"recordings": [], "error": str(err)}),
+                retain=False,
             )
             return
 
@@ -507,10 +535,12 @@ class BatteryMonitor:
         self._publisher.publish(
             f"{state_root}/recent_recordings",
             str(total_count),
+            retain=False,
         )
         self._publisher.publish(
             f"{state_root}/recent_recordings/attributes",
             json.dumps({"recordings": recordings}),
+            retain=False,
         )
 
     async def poll_all(self) -> None:
@@ -518,16 +548,11 @@ class BatteryMonitor:
             try:
                 await self.poll_camera(camera)
             except Exception:
-                identity = self._identity(camera)
-                topic = f"{self._config.state_prefix}/{identity}/availability"
-                try:
-                    self._publisher.publish(topic, "offline")
-                except Exception:
-                    _LOGGER.exception("Could not publish offline status for %s", camera.name)
                 _LOGGER.exception("Failed to poll Reolink camera %s", camera.name)
 
     async def run(self) -> None:
         self.publish_discovery()
+        self.publish_metadata()
         while True:
             await self.poll_all()
             await asyncio.sleep(self._config.poll_interval_seconds)

@@ -16,13 +16,26 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class MqttPublisher:
-    def __init__(self, config: MqttConfig, *, insecure: bool = False) -> None:
+    def __init__(
+        self,
+        config: MqttConfig,
+        *,
+        availability_topic: str,
+        insecure: bool = False,
+    ) -> None:
         self._config = config
+        self._availability_topic = availability_topic
         self._connected = threading.Event()
         self._connection_error: str | None = None
         self._client = mqtt.Client(
             CallbackAPIVersion.VERSION2,
             client_id=config.client_id,
+        )
+        self._client.will_set(
+            availability_topic,
+            payload="offline",
+            qos=1,
+            retain=True,
         )
         if config.tls or insecure:
             trusted_cert = None if insecure else config.server_cert or config.ca_cert
@@ -44,6 +57,17 @@ class MqttPublisher:
             self._connection_error = str(reason_code)
         else:
             self._connection_error = None
+            info = self._client.publish(
+                self._availability_topic,
+                "online",
+                qos=1,
+                retain=True,
+            )
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                _LOGGER.error(
+                    "Could not publish MQTT availability: %s",
+                    mqtt.error_string(info.rc),
+                )
         self._connected.set()
 
     def _on_disconnect(self, *_args: Any) -> None:
@@ -69,5 +93,9 @@ class MqttPublisher:
             raise TimeoutError(f"MQTT publish did not complete for topic '{topic}'")
 
     def close(self) -> None:
-        self._client.disconnect()
-        self._client.loop_stop()
+        try:
+            if self._connected.is_set() and not self._connection_error:
+                self.publish(self._availability_topic, "offline")
+        finally:
+            self._client.disconnect()
+            self._client.loop_stop()

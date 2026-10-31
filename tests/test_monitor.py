@@ -226,13 +226,15 @@ async def test_poll_publishes_battery_and_charging_status_and_logs_out():
     await monitor.poll_camera(monitor._config.cameras[0])
 
     messages = {topic.rsplit("/", 1)[-1]: payload for topic, payload, _ in publisher.messages}
-    assert messages == {
-        "availability": "online",
-        "battery": "76",
-        "battery_status": "charging",
-        "recent_recordings": "0",
-        "attributes": '{"recordings": []}',
-    }
+    assert messages["battery"] == "76"
+    assert messages["battery_status"] == "charging"
+    assert messages["recent_recordings"] == "0"
+    assert messages["attributes"] == '{"recordings": []}'
+    scraped_at = datetime.fromisoformat(messages["scraped_at_iso"])
+    assert scraped_at.tzinfo is not None
+    assert scraped_at.utcoffset() == datetime.now().astimezone().utcoffset()
+    assert int(scraped_at.timestamp()) == int(messages["scraped_at_unix"])
+    assert all(not retained for _, _, retained in publisher.messages)
     commands = host.baichuan.commands
     assert [cmd_id for cmd_id, _ in commands[:3]] == [14, 15, 16]
     assert [cmd_id for cmd_id, _ in commands[-3:]] == [14, 15, 16]
@@ -269,7 +271,7 @@ async def test_failed_camera_poll_marks_camera_offline():
 
     await monitor.poll_all()
 
-    assert publisher.messages[-1][1] == "offline"
+    assert publisher.messages == []
 
 
 def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
@@ -290,7 +292,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     assert discovery["unique_id"] == "reolink_monitor_garden_ch0_battery"
     assert discovery["state_topic"] == "reolink_monitor/garden_ch0/battery"
     assert discovery["device"]["manufacturer"] == "Reolink"
-    assert discovery["availability_topic"] == "reolink_monitor/garden_ch0/availability"
+    assert discovery["availability_topic"] == "reolink_monitor/availability"
     assert publisher.messages[1][0].endswith("garden_ch0_battery_status/config")
     recordings_discovery = json.loads(publisher.messages[2][1])
     assert recordings_discovery["name"] == "Garden Recent Recordings"
@@ -334,6 +336,7 @@ async def test_poll_publishes_total_recording_count_and_latest_ten_details(caplo
     assert attributes["recordings"][0]["file_name"] == "clip_51.mp4"
     assert attributes["recordings"][-1]["file_name"] == "clip_42.mp4"
     assert attributes["recordings"][0]["trigger"] == "people"
+    assert all(not retained for _, _, retained in publisher.messages)
     command_ids = [cmd_id for cmd_id, _ in host.baichuan.commands]
     assert command_ids[:4] == [14, 15, 15, 16]
     assert command_ids[-3:] == [14, 15, 16]
@@ -361,6 +364,7 @@ async def test_recording_search_uses_configured_lookback_window(monkeypatch):
 
     assert searched["end"] - searched["start"] == timedelta(minutes=37)
     assert publisher.messages[-2][1] == "0"
+    assert all(not retained for _, _, retained in publisher.messages)
 
 
 @pytest.mark.asyncio
@@ -371,10 +375,31 @@ async def test_recording_search_failure_does_not_hide_battery_readings():
     await monitor.poll_camera(monitor._config.cameras[0])
 
     states = {topic.rsplit("/", 1)[-1]: payload for topic, payload, _ in publisher.messages}
-    assert states["availability"] == "online"
     assert states["battery"] == "76"
     assert states["recent_recordings"] == "unknown"
     assert json.loads(states["attributes"]) == {
         "recordings": [],
         "error": "recording search timed out",
     }
+    assert all(not retained for _, _, retained in publisher.messages)
+
+
+def test_publish_metadata_retains_configured_intervals():
+    monitor, publisher = configured_monitor(FakeHost())
+    monitor._config = AppConfig(
+        mqtt=MqttConfig(host="localhost"),
+        cameras=monitor._config.cameras,
+        poll_interval_seconds=45,
+        recent_recordings_lookback_minutes=180,
+    )
+
+    monitor.publish_metadata()
+
+    assert publisher.messages == [
+        (
+            "reolink_monitor/metadata/recent_recordings_lookback_minutes",
+            "180",
+            True,
+        ),
+        ("reolink_monitor/metadata/poll_interval_seconds", "45", True),
+    ]

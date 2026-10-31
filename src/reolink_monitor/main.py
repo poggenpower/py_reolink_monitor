@@ -24,7 +24,11 @@ async def _run(config_path: Path, mode: str, *, mqtt_insecure: bool = False) -> 
         raise ValueError("MQTT configuration is required in MQTT mode")
     from .mqtt import MqttPublisher
 
-    publisher = MqttPublisher(config.mqtt, insecure=mqtt_insecure)
+    publisher = MqttPublisher(
+        config.mqtt,
+        availability_topic=f"{config.state_prefix}/availability",
+        insecure=mqtt_insecure,
+    )
     publisher.connect()
     try:
         await BatteryMonitor(config, publisher).run()

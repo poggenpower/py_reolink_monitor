@@ -75,13 +75,13 @@ Add `--mode stdout` to the final command to run without an MQTT broker.
 
 ## Home Assistant entities
 
-For each configured camera/channel, the monitor publishes retained MQTT discovery and retained state for:
+For each configured camera/channel, the monitor publishes retained MQTT discovery and non-retained state for:
 
 - Battery percentage (`sensor`, device class `battery`, unit `%`)
 - Battery state (`sensor`: `discharging`, `charging`, or `charged`)
 - Recent recordings (`sensor` count with a `recordings` attribute containing details for up to 10 clips from the configurable lookback window; each entry includes filename, start time, duration, and trigger). The sensor count reflects all matching recordings. The Baichuan file-list search includes scheduled as well as event-triggered recordings.
 
-The entities share an availability topic. Failed camera polls mark that camera offline, while a reachable camera with no battery reading publishes `unknown`. If recording search fails, the recording count is `unknown` and its attributes include the error; battery readings are still published.
+The entities use `<state_prefix>/availability`, which is marked online when the MQTT connection is established and uses MQTT Last Will and Testament (LWT) to mark the service offline after an unexpected disconnect. Home Assistant discovery config remains retained; camera state and per-camera metadata are never retained. The service publishes retained configuration metadata at `<state_prefix>/metadata/recent_recordings_lookback_minutes` and `<state_prefix>/metadata/poll_interval_seconds`. After a successful camera poll, it publishes the local-time ISO timestamp at `<state_prefix>/<camera_id>/scraped_at_iso` and its Unix timestamp at `<state_prefix>/<camera_id>/scraped_at_unix`. A reachable camera with no battery reading publishes `unknown`. If recording search fails, the recording count is `unknown` and its attributes include the error; battery readings are still published.
 
 ## Tests and lint
 

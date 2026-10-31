@@ -39,9 +39,10 @@ async def test_first_configured_real_camera_poll(caplog):
 
     identity = re.sub(r"[^a-z0-9]+", "_", camera.name.lower()).strip("_")
     state_root = f"{config.state_prefix}/{identity}_ch{camera.channel}"
-    assert publisher.messages[f"{state_root}/availability"] == "online"
     assert f"{state_root}/battery" in publisher.messages
     assert f"{state_root}/battery_status" in publisher.messages
+    assert f"{state_root}/scraped_at_iso" in publisher.messages
+    assert f"{state_root}/scraped_at_unix" in publisher.messages
     assert f"{state_root}/recent_recordings" in publisher.messages
     assert f"{state_root}/recent_recordings/attributes" in publisher.messages
     assert "searching recordings" in caplog.text

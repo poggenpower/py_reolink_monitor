@@ -71,3 +71,50 @@ async def test_stdout_mode_runs_without_mqtt_config_or_connection(tmp_path, monk
     output = json.loads(capsys.readouterr().out)
     assert output["topic"] == "reolink_monitor/front_door_ch0/battery"
     assert output["payload"] == "50"
+
+
+@pytest.mark.asyncio
+async def test_mqtt_availability_topic_uses_configured_state_prefix(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            state_prefix: custom/monitor
+            mqtt:
+              host: mqtt.local
+            cameras:
+              - name: Front Door
+                host: 192.0.2.10
+                username: admin
+                password: secret
+            """
+        ),
+        encoding="utf-8",
+    )
+    received = {}
+
+    class FakePublisher:
+        def __init__(self, _config, *, availability_topic, insecure=False):
+            received["availability_topic"] = availability_topic
+
+        def connect(self):
+            pass
+
+        def close(self):
+            pass
+
+    class FakeMonitor:
+        def __init__(self, _config, _publisher):
+            pass
+
+        async def run(self):
+            pass
+
+    from reolink_monitor import mqtt
+
+    monkeypatch.setattr(mqtt, "MqttPublisher", FakePublisher)
+    monkeypatch.setattr(main, "BatteryMonitor", FakeMonitor)
+
+    await main._run(config_path, "mqtt")
+
+    assert received["availability_topic"] == "custom/monitor/availability"
