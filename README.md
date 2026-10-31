@@ -75,7 +75,7 @@ Add `--mode stdout` to the final command to run without an MQTT broker.
 
 ## Home Assistant entities
 
-For each configured camera/channel, the monitor publishes retained MQTT discovery and non-retained state for:
+The monitor publishes a **Reolink Bridge** device with a connectivity diagnostic entity. Each configured camera/channel appears as a child device of the bridge and has retained MQTT discovery and non-retained state for:
 
 - Battery percentage (`sensor`, device class `battery`, unit `%`)
 - Battery state (`sensor`: `discharging`, `charging`, or `charged`)

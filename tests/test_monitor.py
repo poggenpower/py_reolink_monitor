@@ -280,8 +280,31 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     with caplog.at_level(logging.INFO, logger="reolink_monitor.monitor"):
         monitor.publish_discovery()
 
-    assert "Home Assistant MQTT discovery for 1 cameras (3 entities)" in caplog.text
-    battery_topic, battery_payload, retained = publisher.messages[0]
+    assert (
+        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices "
+        "(4 entities)"
+    ) in caplog.text
+    bridge_topic, bridge_payload, retained = publisher.messages[0]
+    bridge = json.loads(bridge_payload)
+    assert bridge_topic == (
+        "homeassistant/binary_sensor/reolink_monitor/bridge_status/config"
+    )
+    assert retained
+    assert bridge["name"] == "Status"
+    assert bridge["unique_id"] == "reolink_monitor_bridge_status"
+    assert bridge["state_topic"] == "reolink_monitor/availability"
+    assert bridge["payload_on"] == "online"
+    assert bridge["payload_off"] == "offline"
+    assert bridge["device_class"] == "connectivity"
+    assert bridge["entity_category"] == "diagnostic"
+    assert bridge["device"] == {
+        "identifiers": ["reolink_monitor_bridge"],
+        "manufacturer": "Reolink",
+        "model": "Reolink Monitor",
+        "name": "Reolink Bridge",
+    }
+
+    battery_topic, battery_payload, retained = publisher.messages[1]
     discovery = json.loads(battery_payload)
     assert battery_topic == (
         "homeassistant/sensor/reolink_monitor/garden_ch0_battery/config"
@@ -292,9 +315,10 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     assert discovery["unique_id"] == "reolink_monitor_garden_ch0_battery"
     assert discovery["state_topic"] == "reolink_monitor/garden_ch0/battery"
     assert discovery["device"]["manufacturer"] == "Reolink"
+    assert discovery["device"]["via_device"] == ["mqtt", "reolink_monitor_bridge"]
     assert discovery["availability_topic"] == "reolink_monitor/availability"
-    assert publisher.messages[1][0].endswith("garden_ch0_battery_status/config")
-    recordings_discovery = json.loads(publisher.messages[2][1])
+    assert publisher.messages[2][0].endswith("garden_ch0_battery_status/config")
+    recordings_discovery = json.loads(publisher.messages[3][1])
     assert recordings_discovery["name"] == "Garden Recent Recordings"
     assert recordings_discovery["state_topic"] == "reolink_monitor/garden_ch0/recent_recordings"
     assert recordings_discovery["json_attributes_topic"] == (

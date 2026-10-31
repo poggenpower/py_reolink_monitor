@@ -299,11 +299,35 @@ class BatteryMonitor:
         return f"{_slug(camera.name)}_ch{camera.channel}"
 
     def publish_discovery(self) -> None:
+        bridge_identifier = "reolink_monitor_bridge"
         _LOGGER.info(
-            "Publishing Home Assistant MQTT discovery for %d cameras (%d entities)",
+            "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
+            "(%d entities)",
             len(self._config.cameras),
-            len(self._config.cameras) * 3,
+            len(self._config.cameras) * 3 + 1,
         )
+        bridge_topic = (
+            f"{self._config.discovery_prefix}/binary_sensor/"
+            "reolink_monitor/bridge_status/config"
+        )
+        bridge_device = {
+            "identifiers": [bridge_identifier],
+            "manufacturer": "Reolink",
+            "model": "Reolink Monitor",
+            "name": "Reolink Bridge",
+        }
+        bridge_payload = {
+            "name": "Status",
+            "unique_id": "reolink_monitor_bridge_status",
+            "state_topic": f"{self._config.state_prefix}/availability",
+            "payload_on": "online",
+            "payload_off": "offline",
+            "device_class": "connectivity",
+            "entity_category": "diagnostic",
+            "device": bridge_device,
+        }
+        self._publisher.publish(bridge_topic, json.dumps(bridge_payload), retain=True)
+
         for camera in self._config.cameras:
             identity = self._identity(camera)
             state_root = f"{self._config.state_prefix}/{identity}"
@@ -312,6 +336,7 @@ class BatteryMonitor:
                 "identifiers": [f"reolink_monitor_{identity}"],
                 "manufacturer": "Reolink",
                 "name": camera.name,
+                "via_device": ["mqtt", bridge_identifier],
             }
             entities = (
                 (
