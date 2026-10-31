@@ -336,7 +336,7 @@ class BatteryMonitor:
                 "identifiers": [f"reolink_monitor_{identity}"],
                 "manufacturer": "Reolink",
                 "name": camera.name,
-                "via_device": ["mqtt", bridge_identifier],
+                "via_device": bridge_identifier,
             }
             entities = (
                 (

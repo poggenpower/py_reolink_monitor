@@ -315,11 +315,14 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     assert discovery["unique_id"] == "reolink_monitor_garden_ch0_battery"
     assert discovery["state_topic"] == "reolink_monitor/garden_ch0/battery"
     assert discovery["device"]["manufacturer"] == "Reolink"
-    assert discovery["device"]["via_device"] == ["mqtt", "reolink_monitor_bridge"]
+    assert discovery["device"]["via_device"] == "reolink_monitor_bridge"
     assert discovery["availability_topic"] == "reolink_monitor/availability"
     assert publisher.messages[2][0].endswith("garden_ch0_battery_status/config")
+    battery_status_discovery = json.loads(publisher.messages[2][1])
+    assert battery_status_discovery["device"]["via_device"] == "reolink_monitor_bridge"
     recordings_discovery = json.loads(publisher.messages[3][1])
     assert recordings_discovery["name"] == "Garden Recent Recordings"
+    assert recordings_discovery["device"]["via_device"] == "reolink_monitor_bridge"
     assert recordings_discovery["state_topic"] == "reolink_monitor/garden_ch0/recent_recordings"
     assert recordings_discovery["json_attributes_topic"] == (
         "reolink_monitor/garden_ch0/recent_recordings/attributes"
