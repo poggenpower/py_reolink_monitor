@@ -38,7 +38,7 @@ The image is published to `ghcr.io/poggenpower/py_reolink_monitor` for both `lin
 
 ## Commit messages
 
-Commit subjects must start with one of these tags: `[feat]`, `[fix]`, `[docs]`, or `[chore]`, followed by a short description. GitHub Actions validates commit messages on pushes, pull requests, and version tags.
+Commit subjects must start with one of these tags: `[feat]`, `[fix]`, `[docs]`, or `[chore]`, followed by a short description. GitHub Actions validates commit messages on pushes, pull requests, and version tags. To check the format before each local commit, enable the repository hook with `git config core.hooksPath .githooks`; Git then runs the `commit-msg` hook.
 
 ## Stdout mode
 
