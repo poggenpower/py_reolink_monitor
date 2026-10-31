@@ -75,17 +75,32 @@ Add `--mode stdout` to the final command to run without an MQTT broker.
 
 ## Home Assistant entities
 
-The monitor publishes a **Reolink Bridge** device with a connectivity diagnostic entity. Each configured camera/channel appears as a child device of the bridge and has retained MQTT discovery and non-retained state for:
+The monitor publishes a **Reolink Bridge** device with a connectivity diagnostic entity. Each configured camera/channel appears as a child device of the bridge. All camera topics are under `<state_prefix>/camera/<camera_id>/state/`, outside the bridge branch, and are exposed as Home Assistant entities:
 
 - Battery percentage (`sensor`, device class `battery`, unit `%`)
 - Battery state (`sensor`: `discharging`, `charging`, or `charged`)
 - Recent recordings (`sensor` count with a `recordings` attribute containing details for up to 10 clips from the configurable lookback window; each entry includes filename, start time, duration, and trigger). The sensor count reflects all matching recordings. The Baichuan file-list search includes scheduled as well as event-triggered recordings.
+- Last scraped time (`sensor`, timestamp) and its Unix timestamp (`sensor`, seconds)
 
-The entities use `<state_prefix>/availability`, which is marked online when the MQTT connection is established and uses MQTT Last Will and Testament (LWT) to mark the service offline after an unexpected disconnect. Home Assistant discovery config remains retained; camera state and per-camera metadata are never retained. The service publishes retained configuration metadata at `<state_prefix>/metadata/recent_recordings_lookback_minutes` and `<state_prefix>/metadata/poll_interval_seconds`. After a successful camera poll, it publishes the local-time ISO timestamp at `<state_prefix>/<camera_id>/scraped_at_iso` and its Unix timestamp at `<state_prefix>/<camera_id>/scraped_at_unix`. A reachable camera with no battery reading publishes `unknown`. If recording search fails, the recording count is `unknown` and its attributes include the error; battery readings are still published.
+Bridge topics are grouped under `<state_prefix>/bridge/`:
 
-In MQTT mode, Home Assistant discovery adds a one-time lookback number, a **Scrape Now** button, and a scrape-status sensor to the bridge device. The number publishes integer minutes to `<state_prefix>/cmnd/set_onetime_lookback`; its initial and reset value is the configured `recent_recordings_lookback_minutes`. Set it before pressing the button to use that lookback for the next button-triggered scrape. It resets to the configured value as that scrape starts. The number accepts values from 1 to 525600 minutes (or the configured default if it is higher). Command messages should not be retained.
+| Topic | Purpose |
+| --- | --- |
+| `availability` | Bridge online/offline state and MQTT LWT |
+| `metadata/poll_interval_seconds` | Configured poll interval; diagnostic sensor in Home Assistant |
+| `metadata/recent_recordings_lookback_minutes` | Configured default lookback; diagnostic sensor in Home Assistant |
+| `onetime_lookback_minutes/state` | Current one-time lookback; retained state of the Home Assistant Number |
+| `onetime_lookback_minutes/set` | Number command topic; accepts integer minutes and is not retained |
+| `scrape/state` | Current scrape status (`idle`, `running`, `completed`, `partial`, `failed`, or `cancelled`); retained sensor state |
+| `scrape/attributes` | Retained JSON attributes for the scrape-status sensor |
+| `scrape/trigger` | **Scrape Now** button command (`PRESS`); not retained |
+| `scrape/finished` | Non-retained JSON completion event, exposed as a Home Assistant MQTT Event |
 
-The button publishes `PRESS` to `<state_prefix>/cmnd/scrape_now`. Scrapes never overlap: a button press while an interval scrape is running marks that active run as triggered by `both`, and does not start another. That run keeps the lookback selected when it started; a pending one-time lookback remains set for the next button-triggered scrape that can start. A button press during a button-triggered scrape does not start another scrape. Every interval and button-triggered scrape publishes retained status (`running`, then `completed`, `partial`, `failed`, or `cancelled`) to `<state_prefix>/scrape/status`; the status attributes include the run ID, trigger, lookback, timestamps, and camera failure details. On completion, a non-retained JSON event is published to `<state_prefix>/scrape/events/scrape_finished`, suitable for a Home Assistant MQTT automation trigger. Its `status` and `trigger` fields identify the outcome and whether it was triggered by `interval`, `button`, or `both`.
+Home Assistant discovery configuration remains under the configured `discovery_prefix` (normally `homeassistant/`). Discovery adds entities for every configured camera and bridge topic, including the metadata sensors, the one-time lookback Number, the scrape status sensor, and the scrape-finished Event. The Number uses separate state and `/set` command topics so Home Assistant displays the value confirmed by the monitor; its initial and reset value is the configured `recent_recordings_lookback_minutes`. Set it before pressing the button to use that lookback for the next button-triggered scrape. It resets to the configured value as that scrape starts. The number accepts values from 1 to 525600 minutes (or the configured default if it is higher).
+
+Discovery config, bridge availability, bridge metadata, one-time lookback state, scrape status, and scrape attributes are retained. Camera states, command messages, and scrape-finished events are not retained; camera sensors expire after three polling intervals. A reachable camera with no battery reading publishes `unknown`. If recording search fails, the recording count is `unknown` and its attributes include the error; battery readings are still published.
+
+Scrapes never overlap: a button press while an interval scrape is running marks that active run as triggered by `both`, and does not start another. That run keeps the lookback selected when it started; a pending one-time lookback remains set for the next button-triggered scrape that can start. A button press during a button-triggered scrape does not start another scrape. The scrape-finished event contains `event_type`, `status`, and `trigger`, plus the run ID, lookback, timestamps, and camera failure details. The trigger is `interval`, `button`, or `both`.
 
 ## Tests and lint
 

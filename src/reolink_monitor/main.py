@@ -24,9 +24,10 @@ async def _run(config_path: Path, mode: str, *, mqtt_insecure: bool = False) -> 
         raise ValueError("MQTT configuration is required in MQTT mode")
     from .mqtt import MqttPublisher
 
+    bridge_root = f"{config.state_prefix}/bridge"
     publisher = MqttPublisher(
         config.mqtt,
-        availability_topic=f"{config.state_prefix}/availability",
+        availability_topic=f"{bridge_root}/availability",
         insecure=mqtt_insecure,
     )
     command_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
@@ -35,7 +36,13 @@ async def _run(config_path: Path, mode: str, *, mqtt_insecure: bool = False) -> 
     def enqueue_command(topic: str, payload: str) -> None:
         loop.call_soon_threadsafe(command_queue.put_nowait, (topic, payload))
 
-    publisher.subscribe_commands(f"{config.state_prefix}/cmnd/#", enqueue_command)
+    publisher.subscribe_commands(
+        (
+            f"{bridge_root}/onetime_lookback_minutes/set",
+            f"{bridge_root}/scrape/trigger",
+        ),
+        enqueue_command,
+    )
     publisher.connect()
     try:
         await BatteryMonitor(config, publisher).run(command_queue)

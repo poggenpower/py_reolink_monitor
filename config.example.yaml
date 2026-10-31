@@ -1,6 +1,7 @@
 poll_interval_seconds: 300
 recent_recordings_lookback_minutes: 1440
 discovery_prefix: homeassistant
+# Camera topics use <prefix>/camera/; app and bridge topics use <prefix>/bridge/.
 state_prefix: reolink_monitor
 
 mqtt:

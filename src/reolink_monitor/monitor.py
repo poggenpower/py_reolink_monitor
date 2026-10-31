@@ -308,13 +308,21 @@ class BatteryMonitor:
     def _identity(self, camera: CameraConfig) -> str:
         return f"{_slug(camera.name)}_ch{camera.channel}"
 
+    def _camera_state_root(self, camera: CameraConfig) -> str:
+        return (
+            f"{self._config.state_prefix}/camera/"
+            f"{self._identity(camera)}/state"
+        )
+
     def publish_discovery(self) -> None:
         bridge_identifier = "reolink_monitor_bridge"
+        bridge_root = f"{self._config.state_prefix}/bridge"
+        availability_topic = f"{bridge_root}/availability"
         _LOGGER.info(
             "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
-            "(%d entities, including monitor controls)",
+            "(%d entities total)",
             len(self._config.cameras),
-            len(self._config.cameras) * 3 + 4,
+            len(self._config.cameras) * 5 + 7,
         )
         bridge_topic = (
             f"{self._config.discovery_prefix}/binary_sensor/"
@@ -329,7 +337,7 @@ class BatteryMonitor:
         bridge_payload = {
             "name": "Status",
             "unique_id": "reolink_monitor_bridge_status",
-            "state_topic": f"{self._config.state_prefix}/availability",
+            "state_topic": availability_topic,
             "payload_on": "online",
             "payload_off": "offline",
             "device_class": "connectivity",
@@ -340,8 +348,7 @@ class BatteryMonitor:
 
         for camera in self._config.cameras:
             identity = self._identity(camera)
-            state_root = f"{self._config.state_prefix}/{identity}"
-            availability_topic = f"{self._config.state_prefix}/availability"
+            state_root = self._camera_state_root(camera)
             device = {
                 "identifiers": [f"reolink_monitor_{identity}"],
                 "manufacturer": "Reolink",
@@ -372,6 +379,22 @@ class BatteryMonitor:
                         "json_attributes_topic": f"{state_root}/recent_recordings/attributes",
                     },
                 ),
+                (
+                    "scraped_at_iso",
+                    "Last Scraped",
+                    {
+                        "device_class": "timestamp",
+                        "entity_category": "diagnostic",
+                    },
+                ),
+                (
+                    "scraped_at_unix",
+                    "Last Scraped (Unix)",
+                    {
+                        "unit_of_measurement": "s",
+                        "entity_category": "diagnostic",
+                    },
+                ),
             )
             for key, label, attributes in entities:
                 topic = (
@@ -392,20 +415,49 @@ class BatteryMonitor:
                 self._publisher.publish(topic, json.dumps(payload), retain=True)
 
         controls_device = bridge_device
-        lookback_topic = f"{self._config.state_prefix}/control/onetime_lookback_minutes"
+        metadata_root = f"{bridge_root}/metadata"
+        for key, label, unit in (
+            ("poll_interval_seconds", "Poll Interval", "s"),
+            (
+                "recent_recordings_lookback_minutes",
+                "Recent Recordings Lookback",
+                "min",
+            ),
+        ):
+            self._publisher.publish(
+                f"{self._config.discovery_prefix}/sensor/"
+                f"reolink_monitor/{key}/config",
+                json.dumps(
+                    {
+                        "name": label,
+                        "unique_id": f"reolink_monitor_{key}",
+                        "state_topic": f"{metadata_root}/{key}",
+                        "unit_of_measurement": unit,
+                        "entity_category": "diagnostic",
+                        "device": controls_device,
+                    }
+                ),
+                retain=True,
+            )
+
+        lookback_root = f"{bridge_root}/onetime_lookback_minutes"
         self._publisher.publish(
             f"{self._config.discovery_prefix}/number/reolink_monitor/onetime_lookback/config",
             json.dumps(
                 {
                     "name": "One-time Lookback",
                     "unique_id": "reolink_monitor_onetime_lookback",
-                    "state_topic": lookback_topic,
-                    "command_topic": f"{self._config.state_prefix}/cmnd/set_onetime_lookback",
+                    "state_topic": f"{lookback_root}/state",
+                    "command_topic": f"{lookback_root}/set",
+                    "retain": False,
                     "min": 1,
                     "max": max(525600, self._config.recent_recordings_lookback_minutes),
                     "step": 1,
                     "mode": "box",
                     "unit_of_measurement": "min",
+                    "availability_topic": availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
                     "device": controls_device,
                 }
             ),
@@ -417,23 +469,27 @@ class BatteryMonitor:
                 {
                     "name": "Scrape Now",
                     "unique_id": "reolink_monitor_scrape_now",
-                    "command_topic": f"{self._config.state_prefix}/cmnd/scrape_now",
+                    "command_topic": f"{bridge_root}/scrape/trigger",
                     "payload_press": "PRESS",
+                    "retain": False,
+                    "availability_topic": availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
                     "device": controls_device,
                 }
             ),
             retain=True,
         )
-        scrape_status_root = f"{self._config.state_prefix}/scrape"
+        scrape_root = f"{bridge_root}/scrape"
         self._publisher.publish(
             f"{self._config.discovery_prefix}/sensor/reolink_monitor/scrape_status/config",
             json.dumps(
                 {
                     "name": "Scrape Status",
                     "unique_id": "reolink_monitor_scrape_status",
-                    "state_topic": f"{scrape_status_root}/status",
-                    "json_attributes_topic": f"{scrape_status_root}/status/attributes",
-                    "availability_topic": f"{self._config.state_prefix}/availability",
+                    "state_topic": f"{scrape_root}/state",
+                    "json_attributes_topic": f"{scrape_root}/attributes",
+                    "availability_topic": availability_topic,
                     "payload_available": "online",
                     "payload_not_available": "offline",
                     "device": controls_device,
@@ -442,9 +498,26 @@ class BatteryMonitor:
             ),
             retain=True,
         )
+        self._publisher.publish(
+            f"{self._config.discovery_prefix}/event/reolink_monitor/scrape_finished/config",
+            json.dumps(
+                {
+                    "name": "Scrape Finished",
+                    "unique_id": "reolink_monitor_scrape_finished",
+                    "state_topic": f"{scrape_root}/finished",
+                    "event_types": ["completed", "partial", "failed", "cancelled"],
+                    "availability_topic": availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                    "entity_category": "diagnostic",
+                    "device": controls_device,
+                }
+            ),
+            retain=True,
+        )
 
     def publish_metadata(self) -> None:
-        metadata_root = f"{self._config.state_prefix}/metadata"
+        metadata_root = f"{self._config.state_prefix}/bridge/metadata"
         self._publisher.publish(
             f"{metadata_root}/recent_recordings_lookback_minutes",
             str(self._config.recent_recordings_lookback_minutes),
@@ -543,8 +616,7 @@ class BatteryMonitor:
             await host.get_states()
             percentage = host.battery_percentage(camera.channel)
             status_code = host.battery_status(camera.channel)
-            identity = self._identity(camera)
-            state_root = f"{self._config.state_prefix}/{identity}"
+            state_root = self._camera_state_root(camera)
             if percentage is None:
                 battery = "unknown"
                 status = "unknown"
@@ -661,11 +733,18 @@ class BatteryMonitor:
         status: str,
         attributes: dict[str, object],
     ) -> None:
-        root = f"{self._config.state_prefix}/scrape"
-        self._publisher.publish(f"{root}/status", status, retain=True)
+        root = f"{self._config.state_prefix}/bridge/scrape"
+        self._publisher.publish(f"{root}/state", status, retain=True)
         self._publisher.publish(
-            f"{root}/status/attributes",
+            f"{root}/attributes",
             json.dumps(attributes),
+            retain=True,
+        )
+
+    def _publish_one_time_lookback(self) -> None:
+        self._publisher.publish(
+            f"{self._config.state_prefix}/bridge/onetime_lookback_minutes/state",
+            str(self._one_time_lookback),
             retain=True,
         )
 
@@ -673,48 +752,28 @@ class BatteryMonitor:
         normalized = payload.strip()
         if not normalized.isdecimal():
             _LOGGER.warning("Ignoring invalid set_onetime_lookback payload: %s", payload)
-            self._publisher.publish(
-                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-                str(self._one_time_lookback),
-                retain=True,
-            )
+            self._publish_one_time_lookback()
             return None
         try:
             value = int(normalized)
         except ValueError:
             _LOGGER.warning("Ignoring invalid set_onetime_lookback payload: %s", payload)
-            self._publisher.publish(
-                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-                str(self._one_time_lookback),
-                retain=True,
-            )
+            self._publish_one_time_lookback()
             return None
         if value < 1:
             _LOGGER.warning("Ignoring invalid set_onetime_lookback payload: %s", payload)
-            self._publisher.publish(
-                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-                str(self._one_time_lookback),
-                retain=True,
-            )
+            self._publish_one_time_lookback()
             return None
         if value > max(525600, self._config.recent_recordings_lookback_minutes):
             _LOGGER.warning("Ignoring out-of-range one-time lookback: %s", payload)
-            self._publisher.publish(
-                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-                str(self._one_time_lookback),
-                retain=True,
-            )
+            self._publish_one_time_lookback()
             return None
         self._one_time_lookback = value
-        self._publisher.publish(
-            f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-            str(value),
-            retain=True,
-        )
+        self._publish_one_time_lookback()
         return value
 
     async def _run_scrape(self, run: ScrapeRun) -> None:
-        root = f"{self._config.state_prefix}/scrape"
+        root = f"{self._config.state_prefix}/bridge/scrape"
         attributes: dict[str, object] = {
             "run_id": run.run_id,
             "trigger": run.trigger,
@@ -737,8 +796,10 @@ class BatteryMonitor:
             )
             self._publish_scrape_status("cancelled", attributes)
             self._publisher.publish(
-                f"{root}/events/scrape_finished",
-                json.dumps({"status": "cancelled", **attributes}),
+                f"{root}/finished",
+                json.dumps(
+                    {"event_type": "cancelled", "status": "cancelled", **attributes}
+                ),
                 retain=False,
             )
             raise
@@ -758,8 +819,8 @@ class BatteryMonitor:
         )
         self._publish_scrape_status(status, attributes)
         self._publisher.publish(
-            f"{root}/events/scrape_finished",
-            json.dumps({"status": status, **attributes}),
+            f"{root}/finished",
+            json.dumps({"event_type": status, "status": status, **attributes}),
             retain=False,
         )
         _LOGGER.info(
@@ -777,11 +838,7 @@ class BatteryMonitor:
         self.publish_discovery()
         self.publish_metadata()
         self._one_time_lookback = self._config.recent_recordings_lookback_minutes
-        self._publisher.publish(
-            f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-            str(self._one_time_lookback),
-            retain=True,
-        )
+        self._publish_one_time_lookback()
         self._publish_scrape_status("idle", {})
         loop = asyncio.get_running_loop()
         next_interval = loop.time()
@@ -833,14 +890,14 @@ class BatteryMonitor:
                 if command_task in done:
                     topic, payload = command_task.result()
                     command_task = None
-                    expected_prefix = f"{self._config.state_prefix}/cmnd/"
+                    expected_prefix = f"{self._config.state_prefix}/bridge/"
                     if not topic.startswith(expected_prefix):
                         _LOGGER.warning("Ignoring unsupported MQTT command topic: %s", topic)
                         continue
                     command = topic.removeprefix(expected_prefix)
-                    if command == "set_onetime_lookback":
+                    if command == "onetime_lookback_minutes/set":
                         self._set_one_time_lookback(payload)
-                    elif command == "scrape_now":
+                    elif command == "scrape/trigger":
                         if payload.strip() != "PRESS":
                             _LOGGER.warning("Ignoring invalid scrape_now payload: %s", payload)
                             continue
@@ -866,11 +923,7 @@ class BatteryMonitor:
                             self._one_time_lookback = (
                                 self._config.recent_recordings_lookback_minutes
                             )
-                            self._publisher.publish(
-                                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
-                                str(self._one_time_lookback),
-                                retain=True,
-                            )
+                            self._publish_one_time_lookback()
                             scrape_task = asyncio.create_task(self._run_scrape(active_run))
                     else:
                         _LOGGER.warning("Ignoring unsupported MQTT command: %s", command)

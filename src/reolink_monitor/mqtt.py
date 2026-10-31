@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import ssl
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import paho.mqtt.client as mqtt
@@ -29,7 +29,7 @@ class MqttPublisher:
         self._connected = threading.Event()
         self._connection_error: str | None = None
         self._subscription_error: str | None = None
-        self._command_topic: str | None = None
+        self._command_topics: tuple[str, ...] = ()
         self._command_callback: Callable[[str, str], None] | None = None
         self._client = mqtt.Client(
             CallbackAPIVersion.VERSION2,
@@ -73,7 +73,7 @@ class MqttPublisher:
                     "Could not publish MQTT availability: %s",
                     mqtt.error_string(info.rc),
                 )
-            if self._command_topic is not None:
+            if self._command_topics:
                 try:
                     self._subscribe_commands()
                 except ConnectionError as err:
@@ -82,21 +82,21 @@ class MqttPublisher:
         self._connected.set()
 
     def _subscribe_commands(self) -> None:
-        assert self._command_topic is not None
-        result, _message_id = self._client.subscribe(self._command_topic, qos=1)
-        if result != mqtt.MQTT_ERR_SUCCESS:
-            error = ConnectionError(
-                f"Could not subscribe to MQTT command topic '{self._command_topic}': "
-                f"{mqtt.error_string(result)}"
-            )
-            self._subscription_error = str(error)
-            raise error
+        for topic in self._command_topics:
+            result, _message_id = self._client.subscribe(topic, qos=1)
+            if result != mqtt.MQTT_ERR_SUCCESS:
+                error = ConnectionError(
+                    f"Could not subscribe to MQTT command topic '{topic}': "
+                    f"{mqtt.error_string(result)}"
+                )
+                self._subscription_error = str(error)
+                raise error
         self._subscription_error = None
 
     def subscribe_commands(
-        self, topic: str, callback: Callable[[str, str], None]
+        self, topics: str | Sequence[str], callback: Callable[[str, str], None]
     ) -> None:
-        self._command_topic = topic
+        self._command_topics = (topics,) if isinstance(topics, str) else tuple(topics)
         self._command_callback = callback
         if self._connected.is_set() and not self._connection_error:
             self._subscribe_commands()

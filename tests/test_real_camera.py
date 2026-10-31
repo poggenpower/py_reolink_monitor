@@ -38,7 +38,7 @@ async def test_first_configured_real_camera_poll(caplog):
     await monitor.poll_camera(camera)
 
     identity = re.sub(r"[^a-z0-9]+", "_", camera.name.lower()).strip("_")
-    state_root = f"{config.state_prefix}/{identity}_ch{camera.channel}"
+    state_root = f"{config.state_prefix}/camera/{identity}_ch{camera.channel}/state"
     assert f"{state_root}/battery" in publisher.messages
     assert f"{state_root}/battery_status" in publisher.messages
     assert f"{state_root}/scraped_at_iso" in publisher.messages

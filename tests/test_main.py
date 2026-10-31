@@ -62,14 +62,14 @@ async def test_stdout_mode_runs_without_mqtt_config_or_connection(tmp_path, monk
             self.publisher = publisher
 
         async def run(self):
-            self.publisher.publish("reolink_monitor/front_door_ch0/battery", "50")
+            self.publisher.publish("reolink_monitor/camera/front_door_ch0/state/battery", "50")
 
     monkeypatch.setattr(main, "BatteryMonitor", FakeMonitor)
 
     await main._run(config_path, "stdout")
 
     output = json.loads(capsys.readouterr().out)
-    assert output["topic"] == "reolink_monitor/front_door_ch0/battery"
+    assert output["topic"] == "reolink_monitor/camera/front_door_ch0/state/battery"
     assert output["payload"] == "50"
 
 
@@ -120,5 +120,8 @@ async def test_mqtt_availability_topic_uses_configured_state_prefix(tmp_path, mo
 
     await main._run(config_path, "mqtt")
 
-    assert received["availability_topic"] == "custom/monitor/availability"
-    assert received["command_topic"] == "custom/monitor/cmnd/#"
+    assert received["availability_topic"] == "custom/monitor/bridge/availability"
+    assert received["command_topic"] == (
+        "custom/monitor/bridge/onetime_lookback_minutes/set",
+        "custom/monitor/bridge/scrape/trigger",
+    )

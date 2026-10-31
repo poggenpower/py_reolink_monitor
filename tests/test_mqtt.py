@@ -170,3 +170,22 @@ def test_mqtt_subscribes_to_commands_and_forwards_messages(monkeypatch):
 
     assert publisher._client.subscribed == [("custom/cmnd/#", 1)]
     assert received == [("custom/cmnd/scrape_now", "60")]
+
+
+def test_mqtt_subscribes_to_multiple_command_topics(monkeypatch):
+    monkeypatch.setattr(mqtt.mqtt, "Client", FakeClient)
+    publisher = mqtt.MqttPublisher(
+        MqttConfig(host="mqtt.local"),
+        availability_topic="custom/availability",
+    )
+    publisher.subscribe_commands(
+        ("custom/bridge/lookback/set", "custom/bridge/scrape/trigger"),
+        lambda _topic, _payload: None,
+    )
+
+    publisher._on_connect(None, None, None, SuccessfulReasonCode())
+
+    assert publisher._client.subscribed == [
+        ("custom/bridge/lookback/set", 1),
+        ("custom/bridge/scrape/trigger", 1),
+    ]

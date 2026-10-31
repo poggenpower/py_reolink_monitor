@@ -273,11 +273,16 @@ async def test_one_time_lookback_is_used_for_recording_search(monkeypatch):
 
 
 def test_one_time_lookback_requires_positive_integer():
-    monitor, _publisher = configured_monitor(FakeHost())
+    monitor, publisher = configured_monitor(FakeHost())
     monitor._one_time_lookback = 1440
 
     assert monitor._set_one_time_lookback("60") == 60
     assert monitor._one_time_lookback == 60
+    assert publisher.messages[0] == (
+        "reolink_monitor/bridge/onetime_lookback_minutes/state",
+        "60",
+        True,
+    )
     assert monitor._set_one_time_lookback("1.5") is None
     assert monitor._one_time_lookback == 60
     assert monitor._set_one_time_lookback("0") is None
@@ -302,10 +307,11 @@ async def test_scrape_publishes_final_status_and_event(monkeypatch):
     await monitor._run_scrape(run)
 
     messages = {topic: (payload, retained) for topic, payload, retained in publisher.messages}
-    assert messages["reolink_monitor/scrape/status"] == ("failed", True)
-    event, retained = messages["reolink_monitor/scrape/events/scrape_finished"]
+    assert messages["reolink_monitor/bridge/scrape/state"] == ("failed", True)
+    event, retained = messages["reolink_monitor/bridge/scrape/finished"]
     assert not retained
     result = json.loads(event)
+    assert result["event_type"] == "failed"
     assert result["status"] == "failed"
     assert result["trigger"] == "both"
     assert result["run_id"] == "run-1"
@@ -332,7 +338,7 @@ async def test_button_during_interval_marks_current_scrape_both_without_overlap(
 
     def publish(topic, payload, retain=True):
         original_publisher_publish(topic, payload, retain)
-        if topic == "reolink_monitor/scrape/events/scrape_finished":
+        if topic == "reolink_monitor/bridge/scrape/finished":
             scrape_finished.set()
 
     async def poll_all(_lookback_minutes):
@@ -348,7 +354,7 @@ async def test_button_during_interval_marks_current_scrape_both_without_overlap(
     run_task = asyncio.create_task(monitor.run(command_queue))
     try:
         await asyncio.wait_for(scrape_started.wait(), timeout=1)
-        command_queue.put_nowait(("reolink_monitor/cmnd/scrape_now", "PRESS"))
+        command_queue.put_nowait(("reolink_monitor/bridge/scrape/trigger", "PRESS"))
         await asyncio.wait_for(trigger_updated.wait(), timeout=1)
         release_scrape.set()
         await asyncio.wait_for(scrape_finished.wait(), timeout=1)
@@ -360,7 +366,7 @@ async def test_button_during_interval_marks_current_scrape_both_without_overlap(
     event = next(
         json.loads(payload)
         for topic, payload, _retained in publisher.messages
-        if topic == "reolink_monitor/scrape/events/scrape_finished"
+        if topic == "reolink_monitor/bridge/scrape/finished"
     )
     assert poll_count == 1
     assert event["trigger"] == "both"
@@ -398,18 +404,16 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
         monitor.publish_discovery()
 
     assert (
-        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices "
-        "(7 entities, including monitor controls)"
-    ) in caplog.text
+        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (12 entities total)"
+        in caplog.text
+    )
     bridge_topic, bridge_payload, retained = publisher.messages[0]
     bridge = json.loads(bridge_payload)
-    assert bridge_topic == (
-        "homeassistant/binary_sensor/reolink_monitor/bridge_status/config"
-    )
+    assert bridge_topic == ("homeassistant/binary_sensor/reolink_monitor/bridge_status/config")
     assert retained
     assert bridge["name"] == "Status"
     assert bridge["unique_id"] == "reolink_monitor_bridge_status"
-    assert bridge["state_topic"] == "reolink_monitor/availability"
+    assert bridge["state_topic"] == "reolink_monitor/bridge/availability"
     assert bridge["payload_on"] == "online"
     assert bridge["payload_off"] == "offline"
     assert bridge["device_class"] == "connectivity"
@@ -423,47 +427,99 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
 
     battery_topic, battery_payload, retained = publisher.messages[1]
     discovery = json.loads(battery_payload)
-    assert battery_topic == (
-        "homeassistant/sensor/reolink_monitor/garden_ch0_battery/config"
-    )
+    assert battery_topic == ("homeassistant/sensor/reolink_monitor/garden_ch0_battery/config")
     assert retained
     assert discovery["device_class"] == "battery"
     assert discovery["unit_of_measurement"] == "%"
     assert discovery["unique_id"] == "reolink_monitor_garden_ch0_battery"
-    assert discovery["state_topic"] == "reolink_monitor/garden_ch0/battery"
+    assert discovery["state_topic"] == ("reolink_monitor/camera/garden_ch0/state/battery")
     assert discovery["device"]["manufacturer"] == "Reolink"
     assert discovery["device"]["via_device"] == "reolink_monitor_bridge"
-    assert discovery["availability_topic"] == "reolink_monitor/availability"
+    assert discovery["availability_topic"] == "reolink_monitor/bridge/availability"
     assert publisher.messages[2][0].endswith("garden_ch0_battery_status/config")
     battery_status_discovery = json.loads(publisher.messages[2][1])
     assert battery_status_discovery["device"]["via_device"] == "reolink_monitor_bridge"
     recordings_discovery = json.loads(publisher.messages[3][1])
     assert recordings_discovery["name"] == "Garden Recent Recordings"
     assert recordings_discovery["device"]["via_device"] == "reolink_monitor_bridge"
-    assert recordings_discovery["state_topic"] == "reolink_monitor/garden_ch0/recent_recordings"
+    camera_state_root = "reolink_monitor/camera/garden_ch0/state"
+    assert recordings_discovery["state_topic"] == (f"{camera_state_root}/recent_recordings")
     assert recordings_discovery["json_attributes_topic"] == (
-        "reolink_monitor/garden_ch0/recent_recordings/attributes"
+        f"{camera_state_root}/recent_recordings/attributes"
     )
     discovery = {topic: json.loads(payload) for topic, payload, _ in publisher.messages}
-    lookback = discovery[
-        "homeassistant/number/reolink_monitor/onetime_lookback/config"
+    scraped_at = discovery["homeassistant/sensor/reolink_monitor/garden_ch0_scraped_at_iso/config"]
+    assert scraped_at["state_topic"] == f"{camera_state_root}/scraped_at_iso"
+    assert scraped_at["device_class"] == "timestamp"
+    scraped_at_unix = discovery[
+        "homeassistant/sensor/reolink_monitor/garden_ch0_scraped_at_unix/config"
     ]
-    assert lookback["state_topic"] == (
-        "reolink_monitor/control/onetime_lookback_minutes"
-    )
-    assert lookback["command_topic"] == "reolink_monitor/cmnd/set_onetime_lookback"
+    assert scraped_at_unix["state_topic"] == f"{camera_state_root}/scraped_at_unix"
+    assert scraped_at_unix["unit_of_measurement"] == "s"
+
+    metadata = discovery["homeassistant/sensor/reolink_monitor/poll_interval_seconds/config"]
+    assert metadata["state_topic"] == ("reolink_monitor/bridge/metadata/poll_interval_seconds")
+    assert (
+        "homeassistant/sensor/reolink_monitor/recent_recordings_lookback_minutes/config"
+    ) in discovery
+
+    lookback = discovery["homeassistant/number/reolink_monitor/onetime_lookback/config"]
+    assert lookback["state_topic"] == ("reolink_monitor/bridge/onetime_lookback_minutes/state")
+    assert lookback["command_topic"] == ("reolink_monitor/bridge/onetime_lookback_minutes/set")
+    assert lookback["retain"] is False
     assert lookback["min"] == 1
     assert lookback["max"] == 525600
     button = discovery["homeassistant/button/reolink_monitor/scrape_now/config"]
-    assert button["command_topic"] == "reolink_monitor/cmnd/scrape_now"
+    assert button["command_topic"] == "reolink_monitor/bridge/scrape/trigger"
+    assert button["retain"] is False
     assert button["payload_press"] == "PRESS"
-    status = discovery[
-        "homeassistant/sensor/reolink_monitor/scrape_status/config"
+    status = discovery["homeassistant/sensor/reolink_monitor/scrape_status/config"]
+    assert status["state_topic"] == "reolink_monitor/bridge/scrape/state"
+    assert status["json_attributes_topic"] == ("reolink_monitor/bridge/scrape/attributes")
+    scrape_event = discovery["homeassistant/event/reolink_monitor/scrape_finished/config"]
+    assert scrape_event["state_topic"] == ("reolink_monitor/bridge/scrape/finished")
+    assert scrape_event["event_types"] == [
+        "completed",
+        "partial",
+        "failed",
+        "cancelled",
     ]
-    assert status["state_topic"] == "reolink_monitor/scrape/status"
-    assert status["json_attributes_topic"] == (
-        "reolink_monitor/scrape/status/attributes"
+    assert publisher.messages[0][2]
+    assert all(retained for _topic, _payload, retained in publisher.messages)
+
+
+def test_discovery_publishes_each_camera_under_its_own_ha_device():
+    monitor, publisher = configured_monitor(FakeHost())
+    monitor._config = AppConfig(
+        mqtt=monitor._config.mqtt,
+        cameras=(
+            *monitor._config.cameras,
+            CameraConfig(
+                name="Back Yard",
+                host="192.0.2.11",
+                username="admin",
+                password="x",
+                channel=1,
+            ),
+        ),
     )
+
+    monitor.publish_discovery()
+
+    discovery = {topic: json.loads(payload) for topic, payload, _ in publisher.messages}
+    for key in (
+        "battery",
+        "battery_status",
+        "recent_recordings",
+        "scraped_at_iso",
+        "scraped_at_unix",
+    ):
+        topic = f"homeassistant/sensor/reolink_monitor/back_yard_ch1_{key}/config"
+        assert topic in discovery
+        assert discovery[topic]["state_topic"].startswith(
+            "reolink_monitor/camera/back_yard_ch1/state/"
+        )
+        assert discovery[topic]["device"]["via_device"] == "reolink_monitor_bridge"
 
 
 @pytest.mark.asyncio
@@ -561,9 +617,9 @@ def test_publish_metadata_retains_configured_intervals():
 
     assert publisher.messages == [
         (
-            "reolink_monitor/metadata/recent_recordings_lookback_minutes",
+            "reolink_monitor/bridge/metadata/recent_recordings_lookback_minutes",
             "180",
             True,
         ),
-        ("reolink_monitor/metadata/poll_interval_seconds", "45", True),
+        ("reolink_monitor/bridge/metadata/poll_interval_seconds", "45", True),
     ]
