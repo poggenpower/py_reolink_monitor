@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime, timedelta
@@ -250,6 +251,122 @@ async def test_poll_publishes_battery_and_charging_status_and_logs_out():
 
 
 @pytest.mark.asyncio
+async def test_one_time_lookback_is_used_for_recording_search(monkeypatch):
+    monitor, _publisher = configured_monitor(FakeHost())
+    camera = monitor._config.cameras[0]
+    search_windows = []
+
+    async def search(_host, _camera, start, end):
+        search_windows.append(end - start)
+        return []
+
+    monkeypatch.setattr(monitor_module, "_search_file_info_recordings", search)
+    monitor._one_time_lookback = 37
+    await monitor._publish_recent_recordings(
+        FakeHost(),
+        camera,
+        "reolink_monitor/garden_ch0",
+        monitor._one_time_lookback,
+    )
+
+    assert search_windows == [timedelta(minutes=37)]
+
+
+def test_one_time_lookback_requires_positive_integer():
+    monitor, _publisher = configured_monitor(FakeHost())
+    monitor._one_time_lookback = 1440
+
+    assert monitor._set_one_time_lookback("60") == 60
+    assert monitor._one_time_lookback == 60
+    assert monitor._set_one_time_lookback("1.5") is None
+    assert monitor._one_time_lookback == 60
+    assert monitor._set_one_time_lookback("0") is None
+    assert monitor._set_one_time_lookback("525601") is None
+
+
+@pytest.mark.asyncio
+async def test_scrape_publishes_final_status_and_event(monkeypatch):
+    monitor, publisher = configured_monitor(FakeHost())
+    run = monitor_module.ScrapeRun(
+        run_id="run-1",
+        trigger="both",
+        lookback_minutes=60,
+        started_at=datetime.now().astimezone(),
+    )
+
+    async def poll_all(lookback_minutes):
+        assert lookback_minutes == 60
+        return ("Garden",)
+
+    monkeypatch.setattr(monitor, "poll_all", poll_all)
+    await monitor._run_scrape(run)
+
+    messages = {topic: (payload, retained) for topic, payload, retained in publisher.messages}
+    assert messages["reolink_monitor/scrape/status"] == ("failed", True)
+    event, retained = messages["reolink_monitor/scrape/events/scrape_finished"]
+    assert not retained
+    result = json.loads(event)
+    assert result["status"] == "failed"
+    assert result["trigger"] == "both"
+    assert result["run_id"] == "run-1"
+    assert result["lookback_minutes"] == 60
+    assert result["failed_cameras"] == ["Garden"]
+
+
+@pytest.mark.asyncio
+async def test_button_during_interval_marks_current_scrape_both_without_overlap(monkeypatch):
+    monitor, publisher = configured_monitor(FakeHost())
+    command_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    scrape_started = asyncio.Event()
+    trigger_updated = asyncio.Event()
+    scrape_finished = asyncio.Event()
+    release_scrape = asyncio.Event()
+    poll_count = 0
+    original_publish = monitor._publish_scrape_status
+    original_publisher_publish = publisher.publish
+
+    def publish_status(status, attributes):
+        original_publish(status, attributes)
+        if status == "running" and attributes.get("trigger") == "both":
+            trigger_updated.set()
+
+    def publish(topic, payload, retain=True):
+        original_publisher_publish(topic, payload, retain)
+        if topic == "reolink_monitor/scrape/events/scrape_finished":
+            scrape_finished.set()
+
+    async def poll_all(_lookback_minutes):
+        nonlocal poll_count
+        poll_count += 1
+        scrape_started.set()
+        await release_scrape.wait()
+        return ()
+
+    monkeypatch.setattr(monitor, "_publish_scrape_status", publish_status)
+    monkeypatch.setattr(publisher, "publish", publish)
+    monkeypatch.setattr(monitor, "poll_all", poll_all)
+    run_task = asyncio.create_task(monitor.run(command_queue))
+    try:
+        await asyncio.wait_for(scrape_started.wait(), timeout=1)
+        command_queue.put_nowait(("reolink_monitor/cmnd/scrape_now", "PRESS"))
+        await asyncio.wait_for(trigger_updated.wait(), timeout=1)
+        release_scrape.set()
+        await asyncio.wait_for(scrape_finished.wait(), timeout=1)
+    finally:
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+    event = next(
+        json.loads(payload)
+        for topic, payload, _retained in publisher.messages
+        if topic == "reolink_monitor/scrape/events/scrape_finished"
+    )
+    assert poll_count == 1
+    assert event["trigger"] == "both"
+
+
+@pytest.mark.asyncio
 async def test_missing_battery_reading_publishes_unknown():
     host = FakeHost(percentage=None)
     monitor, publisher = configured_monitor(host)
@@ -282,7 +399,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
 
     assert (
         "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices "
-        "(4 entities)"
+        "(7 entities, including monitor controls)"
     ) in caplog.text
     bridge_topic, bridge_payload, retained = publisher.messages[0]
     bridge = json.loads(bridge_payload)
@@ -326,6 +443,26 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     assert recordings_discovery["state_topic"] == "reolink_monitor/garden_ch0/recent_recordings"
     assert recordings_discovery["json_attributes_topic"] == (
         "reolink_monitor/garden_ch0/recent_recordings/attributes"
+    )
+    discovery = {topic: json.loads(payload) for topic, payload, _ in publisher.messages}
+    lookback = discovery[
+        "homeassistant/number/reolink_monitor/onetime_lookback/config"
+    ]
+    assert lookback["state_topic"] == (
+        "reolink_monitor/control/onetime_lookback_minutes"
+    )
+    assert lookback["command_topic"] == "reolink_monitor/cmnd/set_onetime_lookback"
+    assert lookback["min"] == 1
+    assert lookback["max"] == 525600
+    button = discovery["homeassistant/button/reolink_monitor/scrape_now/config"]
+    assert button["command_topic"] == "reolink_monitor/cmnd/scrape_now"
+    assert button["payload_press"] == "PRESS"
+    status = discovery[
+        "homeassistant/sensor/reolink_monitor/scrape_status/config"
+    ]
+    assert status["state_topic"] == "reolink_monitor/scrape/status"
+    assert status["json_attributes_topic"] == (
+        "reolink_monitor/scrape/status/attributes"
     )
 
 

@@ -11,6 +11,7 @@ class FakeClient:
         self.ssl_context = None
         self.will = None
         self.published = []
+        self.subscribed = []
         self.disconnected = False
         self.loop_stopped = False
 
@@ -23,6 +24,10 @@ class FakeClient:
     def publish(self, topic, payload, qos=0, retain=False):
         self.published.append((topic, payload, qos, retain))
         return FakePublishInfo()
+
+    def subscribe(self, topic, qos=0):
+        self.subscribed.append((topic, qos))
+        return mqtt.mqtt.MQTT_ERR_SUCCESS, 1
 
     def disconnect(self):
         self.disconnected = True
@@ -129,3 +134,39 @@ def test_mqtt_publishes_retained_lwt_and_availability(monkeypatch):
     ]
     assert publisher._client.disconnected
     assert publisher._client.loop_stopped
+
+
+def test_mqtt_subscribes_to_commands_and_forwards_messages(monkeypatch):
+    monkeypatch.setattr(mqtt.mqtt, "Client", FakeClient)
+    publisher = mqtt.MqttPublisher(
+        MqttConfig(host="mqtt.local"),
+        availability_topic="custom/availability",
+    )
+    received = []
+    publisher.subscribe_commands(
+        "custom/cmnd/#",
+        lambda topic, payload: received.append((topic, payload)),
+    )
+
+    publisher._on_connect(None, None, None, SuccessfulReasonCode())
+    publisher._client.on_message(
+        publisher._client,
+        None,
+        type(
+            "Message",
+            (),
+            {"topic": "custom/cmnd/scrape_now", "payload": b"60", "retain": False},
+        )(),
+    )
+    publisher._client.on_message(
+        publisher._client,
+        None,
+        type(
+            "Message",
+            (),
+            {"topic": "custom/cmnd/scrape_now", "payload": b"PRESS", "retain": True},
+        )(),
+    )
+
+    assert publisher._client.subscribed == [("custom/cmnd/#", 1)]
+    assert received == [("custom/cmnd/scrape_now", "60")]

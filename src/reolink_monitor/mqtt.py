@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import ssl
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import paho.mqtt.client as mqtt
@@ -27,6 +28,9 @@ class MqttPublisher:
         self._availability_topic = availability_topic
         self._connected = threading.Event()
         self._connection_error: str | None = None
+        self._subscription_error: str | None = None
+        self._command_topic: str | None = None
+        self._command_callback: Callable[[str, str], None] | None = None
         self._client = mqtt.Client(
             CallbackAPIVersion.VERSION2,
             client_id=config.client_id,
@@ -50,6 +54,7 @@ class MqttPublisher:
             self._client.username_pw_set(config.username, config.password)
         self._client.on_connect = self._on_connect
         self._client.on_disconnect = self._on_disconnect
+        self._client.on_message = self._on_message
 
     def _on_connect(self, *_args: Any) -> None:
         reason_code = _args[3]
@@ -68,7 +73,46 @@ class MqttPublisher:
                     "Could not publish MQTT availability: %s",
                     mqtt.error_string(info.rc),
                 )
+            if self._command_topic is not None:
+                try:
+                    self._subscribe_commands()
+                except ConnectionError as err:
+                    self._subscription_error = str(err)
+                    _LOGGER.error("%s", err)
         self._connected.set()
+
+    def _subscribe_commands(self) -> None:
+        assert self._command_topic is not None
+        result, _message_id = self._client.subscribe(self._command_topic, qos=1)
+        if result != mqtt.MQTT_ERR_SUCCESS:
+            error = ConnectionError(
+                f"Could not subscribe to MQTT command topic '{self._command_topic}': "
+                f"{mqtt.error_string(result)}"
+            )
+            self._subscription_error = str(error)
+            raise error
+        self._subscription_error = None
+
+    def subscribe_commands(
+        self, topic: str, callback: Callable[[str, str], None]
+    ) -> None:
+        self._command_topic = topic
+        self._command_callback = callback
+        if self._connected.is_set() and not self._connection_error:
+            self._subscribe_commands()
+
+    def _on_message(self, _client: Any, _userdata: Any, message: Any) -> None:
+        if self._command_callback is None:
+            return
+        if message.retain:
+            _LOGGER.warning("Ignoring retained MQTT command on topic %s", message.topic)
+            return
+        try:
+            payload = message.payload.decode("utf-8")
+        except UnicodeDecodeError:
+            _LOGGER.warning("Ignoring non-UTF-8 MQTT command on topic %s", message.topic)
+            return
+        self._command_callback(message.topic, payload)
 
     def _on_disconnect(self, *_args: Any) -> None:
         self._connected.clear()
@@ -85,6 +129,9 @@ class MqttPublisher:
         if self._connection_error:
             self.close()
             raise ConnectionError(f"MQTT broker rejected connection: {self._connection_error}")
+        if self._subscription_error:
+            self.close()
+            raise ConnectionError(self._subscription_error)
 
     def publish(self, topic: str, payload: str, retain: bool = True) -> None:
         info = self._client.publish(topic, payload, qos=1, retain=retain)

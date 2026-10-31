@@ -8,8 +8,10 @@ import json
 import logging
 import re
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, time, timedelta, tzinfo
 from typing import Protocol
+from uuid import uuid4
 from xml.etree import ElementTree as XML
 
 from reolink_aio.api import Host
@@ -96,6 +98,14 @@ class RecentRecording:
     @property
     def duration(self) -> timedelta:
         return self.end_time - self.start_time
+
+
+@dataclass
+class ScrapeRun:
+    run_id: str
+    trigger: str
+    lookback_minutes: int
+    started_at: datetime
 
 
 def _recording_search_xml(
@@ -302,9 +312,9 @@ class BatteryMonitor:
         bridge_identifier = "reolink_monitor_bridge"
         _LOGGER.info(
             "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
-            "(%d entities)",
+            "(%d entities, including monitor controls)",
             len(self._config.cameras),
-            len(self._config.cameras) * 3 + 1,
+            len(self._config.cameras) * 3 + 4,
         )
         bridge_topic = (
             f"{self._config.discovery_prefix}/binary_sensor/"
@@ -380,6 +390,58 @@ class BatteryMonitor:
                     **attributes,
                 }
                 self._publisher.publish(topic, json.dumps(payload), retain=True)
+
+        controls_device = bridge_device
+        lookback_topic = f"{self._config.state_prefix}/control/onetime_lookback_minutes"
+        self._publisher.publish(
+            f"{self._config.discovery_prefix}/number/reolink_monitor/onetime_lookback/config",
+            json.dumps(
+                {
+                    "name": "One-time Lookback",
+                    "unique_id": "reolink_monitor_onetime_lookback",
+                    "state_topic": lookback_topic,
+                    "command_topic": f"{self._config.state_prefix}/cmnd/set_onetime_lookback",
+                    "min": 1,
+                    "max": max(525600, self._config.recent_recordings_lookback_minutes),
+                    "step": 1,
+                    "mode": "box",
+                    "unit_of_measurement": "min",
+                    "device": controls_device,
+                }
+            ),
+            retain=True,
+        )
+        self._publisher.publish(
+            f"{self._config.discovery_prefix}/button/reolink_monitor/scrape_now/config",
+            json.dumps(
+                {
+                    "name": "Scrape Now",
+                    "unique_id": "reolink_monitor_scrape_now",
+                    "command_topic": f"{self._config.state_prefix}/cmnd/scrape_now",
+                    "payload_press": "PRESS",
+                    "device": controls_device,
+                }
+            ),
+            retain=True,
+        )
+        scrape_status_root = f"{self._config.state_prefix}/scrape"
+        self._publisher.publish(
+            f"{self._config.discovery_prefix}/sensor/reolink_monitor/scrape_status/config",
+            json.dumps(
+                {
+                    "name": "Scrape Status",
+                    "unique_id": "reolink_monitor_scrape_status",
+                    "state_topic": f"{scrape_status_root}/status",
+                    "json_attributes_topic": f"{scrape_status_root}/status/attributes",
+                    "availability_topic": f"{self._config.state_prefix}/availability",
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                    "device": controls_device,
+                    "entity_category": "diagnostic",
+                }
+            ),
+            retain=True,
+        )
 
     def publish_metadata(self) -> None:
         metadata_root = f"{self._config.state_prefix}/metadata"
@@ -473,7 +535,9 @@ class BatteryMonitor:
             f"{error_detail}"
         )
 
-    async def poll_camera(self, camera: CameraConfig) -> None:
+    async def poll_camera(
+        self, camera: CameraConfig, lookback_minutes: float | None = None
+    ) -> bool:
         host = await self._connect_camera(camera)
         try:
             await host.get_states()
@@ -491,7 +555,9 @@ class BatteryMonitor:
             self._publisher.publish(
                 f"{state_root}/battery_status", status, retain=False
             )
-            await self._publish_recent_recordings(host, camera, state_root)
+            recordings_ok = await self._publish_recent_recordings(
+                host, camera, state_root, lookback_minutes
+            )
             scraped_at = datetime.now().astimezone()
             self._publisher.publish(
                 f"{state_root}/scraped_at_iso",
@@ -504,15 +570,25 @@ class BatteryMonitor:
                 retain=False,
             )
             _LOGGER.info("%s battery=%s%% status=%s", camera.name, battery, status)
+            return recordings_ok
         finally:
             await self._safe_logout(host)
 
     async def _publish_recent_recordings(
-        self, host: CameraHost, camera: CameraConfig, state_root: str
-    ) -> None:
+        self,
+        host: CameraHost,
+        camera: CameraConfig,
+        state_root: str,
+        lookback_minutes: float | None = None,
+    ) -> bool:
+        lookback_minutes = (
+            self._config.recent_recordings_lookback_minutes
+            if lookback_minutes is None
+            else lookback_minutes
+        )
         # The camera can timestamp clips a few minutes ahead of this host.
         end = datetime.now(host.timezone()) + timedelta(minutes=5)
-        start = end - timedelta(minutes=self._config.recent_recordings_lookback_minutes)
+        start = end - timedelta(minutes=lookback_minutes)
         _LOGGER.debug(
             "%s searching recordings for channel %d stream %s from %s to %s",
             camera.name,
@@ -533,7 +609,7 @@ class BatteryMonitor:
                 json.dumps({"recordings": [], "error": str(err)}),
                 retain=False,
             )
-            return
+            return False
 
         total_count = len(recordings)
         recent = sorted(
@@ -544,7 +620,7 @@ class BatteryMonitor:
             "publishing details for %d",
             camera.name,
             total_count,
-            self._config.recent_recordings_lookback_minutes,
+            lookback_minutes,
             len(recent),
         )
         recordings = [
@@ -567,17 +643,247 @@ class BatteryMonitor:
             json.dumps({"recordings": recordings}),
             retain=False,
         )
+        return True
 
-    async def poll_all(self) -> None:
+    async def poll_all(self, lookback_minutes: float | None = None) -> tuple[str, ...]:
+        failed_cameras = []
         for camera in self._config.cameras:
             try:
-                await self.poll_camera(camera)
+                if not await self.poll_camera(camera, lookback_minutes):
+                    failed_cameras.append(camera.name)
             except Exception:
                 _LOGGER.exception("Failed to poll Reolink camera %s", camera.name)
+                failed_cameras.append(camera.name)
+        return tuple(failed_cameras)
 
-    async def run(self) -> None:
+    def _publish_scrape_status(
+        self,
+        status: str,
+        attributes: dict[str, object],
+    ) -> None:
+        root = f"{self._config.state_prefix}/scrape"
+        self._publisher.publish(f"{root}/status", status, retain=True)
+        self._publisher.publish(
+            f"{root}/status/attributes",
+            json.dumps(attributes),
+            retain=True,
+        )
+
+    def _set_one_time_lookback(self, payload: str) -> int | None:
+        normalized = payload.strip()
+        if not normalized.isdecimal():
+            _LOGGER.warning("Ignoring invalid set_onetime_lookback payload: %s", payload)
+            self._publisher.publish(
+                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+                str(self._one_time_lookback),
+                retain=True,
+            )
+            return None
+        try:
+            value = int(normalized)
+        except ValueError:
+            _LOGGER.warning("Ignoring invalid set_onetime_lookback payload: %s", payload)
+            self._publisher.publish(
+                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+                str(self._one_time_lookback),
+                retain=True,
+            )
+            return None
+        if value < 1:
+            _LOGGER.warning("Ignoring invalid set_onetime_lookback payload: %s", payload)
+            self._publisher.publish(
+                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+                str(self._one_time_lookback),
+                retain=True,
+            )
+            return None
+        if value > max(525600, self._config.recent_recordings_lookback_minutes):
+            _LOGGER.warning("Ignoring out-of-range one-time lookback: %s", payload)
+            self._publisher.publish(
+                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+                str(self._one_time_lookback),
+                retain=True,
+            )
+            return None
+        self._one_time_lookback = value
+        self._publisher.publish(
+            f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+            str(value),
+            retain=True,
+        )
+        return value
+
+    async def _run_scrape(self, run: ScrapeRun) -> None:
+        root = f"{self._config.state_prefix}/scrape"
+        attributes: dict[str, object] = {
+            "run_id": run.run_id,
+            "trigger": run.trigger,
+            "lookback_minutes": run.lookback_minutes,
+            "started_at": run.started_at.isoformat(),
+        }
+        self._publish_scrape_status("running", attributes)
+        try:
+            failed_cameras = await self.poll_all(run.lookback_minutes)
+        except asyncio.CancelledError:
+            finished_at = datetime.now().astimezone()
+            attributes.update(
+                {
+                    "trigger": run.trigger,
+                    "finished_at": finished_at.isoformat(),
+                    "camera_count": len(self._config.cameras),
+                    "failed_count": 0,
+                    "failed_cameras": [],
+                }
+            )
+            self._publish_scrape_status("cancelled", attributes)
+            self._publisher.publish(
+                f"{root}/events/scrape_finished",
+                json.dumps({"status": "cancelled", **attributes}),
+                retain=False,
+            )
+            raise
+        finished_at = datetime.now().astimezone()
+        if failed_cameras:
+            status = "failed" if len(failed_cameras) == len(self._config.cameras) else "partial"
+        else:
+            status = "completed"
+        attributes.update(
+            {
+                "trigger": run.trigger,
+                "finished_at": finished_at.isoformat(),
+                "camera_count": len(self._config.cameras),
+                "failed_count": len(failed_cameras),
+                "failed_cameras": failed_cameras,
+            }
+        )
+        self._publish_scrape_status(status, attributes)
+        self._publisher.publish(
+            f"{root}/events/scrape_finished",
+            json.dumps({"status": status, **attributes}),
+            retain=False,
+        )
+        _LOGGER.info(
+            "Scrape %s finished with status %s (trigger=%s, failed=%d/%d)",
+            run.run_id,
+            status,
+            run.trigger,
+            len(failed_cameras),
+            len(self._config.cameras),
+        )
+
+    async def run(
+        self, command_queue: asyncio.Queue[tuple[str, str]] | None = None
+    ) -> None:
         self.publish_discovery()
         self.publish_metadata()
-        while True:
-            await self.poll_all()
-            await asyncio.sleep(self._config.poll_interval_seconds)
+        self._one_time_lookback = self._config.recent_recordings_lookback_minutes
+        self._publisher.publish(
+            f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+            str(self._one_time_lookback),
+            retain=True,
+        )
+        self._publish_scrape_status("idle", {})
+        loop = asyncio.get_running_loop()
+        next_interval = loop.time()
+        active_run: ScrapeRun | None = None
+        scrape_task: asyncio.Task[None] | None = None
+        command_task: asyncio.Task[tuple[str, str]] | None = None
+        try:
+            while True:
+                if scrape_task is None and loop.time() >= next_interval:
+                    active_run = ScrapeRun(
+                        run_id=str(uuid4()),
+                        trigger="interval",
+                        lookback_minutes=self._config.recent_recordings_lookback_minutes,
+                        started_at=datetime.now().astimezone(),
+                    )
+                    scrape_task = asyncio.create_task(self._run_scrape(active_run))
+                    next_interval = loop.time() + self._config.poll_interval_seconds
+
+                if command_queue is None:
+                    if scrape_task is None:
+                        await asyncio.sleep(max(0, next_interval - loop.time()))
+                    else:
+                        await scrape_task
+                        scrape_task = None
+                        active_run = None
+                        next_interval = loop.time() + self._config.poll_interval_seconds
+                    continue
+
+                if command_task is None:
+                    command_task = asyncio.create_task(command_queue.get())
+                wait_tasks = [command_task]
+                if scrape_task is not None:
+                    wait_tasks.append(scrape_task)
+                timeout = (
+                    None
+                    if scrape_task is not None
+                    else max(0, next_interval - loop.time())
+                )
+                done, _pending = await asyncio.wait(
+                    wait_tasks,
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if scrape_task is not None and scrape_task in done:
+                    await scrape_task
+                    scrape_task = None
+                    active_run = None
+                    next_interval = loop.time() + self._config.poll_interval_seconds
+                if command_task in done:
+                    topic, payload = command_task.result()
+                    command_task = None
+                    expected_prefix = f"{self._config.state_prefix}/cmnd/"
+                    if not topic.startswith(expected_prefix):
+                        _LOGGER.warning("Ignoring unsupported MQTT command topic: %s", topic)
+                        continue
+                    command = topic.removeprefix(expected_prefix)
+                    if command == "set_onetime_lookback":
+                        self._set_one_time_lookback(payload)
+                    elif command == "scrape_now":
+                        if payload.strip() != "PRESS":
+                            _LOGGER.warning("Ignoring invalid scrape_now payload: %s", payload)
+                            continue
+                        if scrape_task is not None and active_run is not None:
+                            if active_run.trigger == "interval":
+                                active_run.trigger = "both"
+                                self._publish_scrape_status(
+                                    "running",
+                                    {
+                                        "run_id": active_run.run_id,
+                                        "trigger": active_run.trigger,
+                                        "lookback_minutes": active_run.lookback_minutes,
+                                        "started_at": active_run.started_at.isoformat(),
+                                    },
+                                )
+                        else:
+                            active_run = ScrapeRun(
+                                run_id=str(uuid4()),
+                                trigger="button",
+                                lookback_minutes=self._one_time_lookback,
+                                started_at=datetime.now().astimezone(),
+                            )
+                            self._one_time_lookback = (
+                                self._config.recent_recordings_lookback_minutes
+                            )
+                            self._publisher.publish(
+                                f"{self._config.state_prefix}/control/onetime_lookback_minutes",
+                                str(self._one_time_lookback),
+                                retain=True,
+                            )
+                            scrape_task = asyncio.create_task(self._run_scrape(active_run))
+                    else:
+                        _LOGGER.warning("Ignoring unsupported MQTT command: %s", command)
+        finally:
+            if command_task is not None and not command_task.done():
+                command_task.cancel()
+                await asyncio.gather(command_task, return_exceptions=True)
+            if scrape_task is not None:
+                if not scrape_task.done():
+                    scrape_task.cancel()
+                    try:
+                        await scrape_task
+                    except asyncio.CancelledError:
+                        pass
+                else:
+                    await scrape_task

@@ -29,9 +29,16 @@ async def _run(config_path: Path, mode: str, *, mqtt_insecure: bool = False) -> 
         availability_topic=f"{config.state_prefix}/availability",
         insecure=mqtt_insecure,
     )
+    command_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def enqueue_command(topic: str, payload: str) -> None:
+        loop.call_soon_threadsafe(command_queue.put_nowait, (topic, payload))
+
+    publisher.subscribe_commands(f"{config.state_prefix}/cmnd/#", enqueue_command)
     publisher.connect()
     try:
-        await BatteryMonitor(config, publisher).run()
+        await BatteryMonitor(config, publisher).run(command_queue)
     finally:
         publisher.close()
 

@@ -97,6 +97,9 @@ async def test_mqtt_availability_topic_uses_configured_state_prefix(tmp_path, mo
         def __init__(self, _config, *, availability_topic, insecure=False):
             received["availability_topic"] = availability_topic
 
+        def subscribe_commands(self, topic, _callback):
+            received["command_topic"] = topic
+
         def connect(self):
             pass
 
@@ -107,7 +110,7 @@ async def test_mqtt_availability_topic_uses_configured_state_prefix(tmp_path, mo
         def __init__(self, _config, _publisher):
             pass
 
-        async def run(self):
+        async def run(self, _command_queue):
             pass
 
     from reolink_monitor import mqtt
@@ -118,3 +121,4 @@ async def test_mqtt_availability_topic_uses_configured_state_prefix(tmp_path, mo
     await main._run(config_path, "mqtt")
 
     assert received["availability_topic"] == "custom/monitor/availability"
+    assert received["command_topic"] == "custom/monitor/cmnd/#"
