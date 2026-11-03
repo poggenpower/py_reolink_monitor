@@ -123,5 +123,6 @@ async def test_mqtt_availability_topic_uses_configured_state_prefix(tmp_path, mo
     assert received["availability_topic"] == "custom/monitor/bridge/availability"
     assert received["command_topic"] == (
         "custom/monitor/bridge/onetime_lookback_minutes/set",
+        "custom/monitor/bridge/onetime_recording_types/set",
         "custom/monitor/bridge/scrape/trigger",
     )

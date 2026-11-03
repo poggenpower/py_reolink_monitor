@@ -14,6 +14,7 @@ from reolink_monitor.config import AppConfig, CameraConfig, MqttConfig
 from reolink_monitor.monitor import (
     _FILE_INFO_PAGE_SIZE,
     BatteryMonitor,
+    RecentRecording,
     _pin_udp_port,
 )
 
@@ -272,6 +273,46 @@ async def test_one_time_lookback_is_used_for_recording_search(monkeypatch):
     assert search_windows == [timedelta(minutes=37)]
 
 
+@pytest.mark.asyncio
+async def test_recording_type_filter_limits_count_and_details(monkeypatch):
+    monitor, publisher = configured_monitor(FakeHost())
+    monitor._config = AppConfig(
+        mqtt=monitor._config.mqtt,
+        cameras=monitor._config.cameras,
+        recent_recordings_types=("vehicle", "animal", "person"),
+    )
+    now = datetime.now(UTC)
+    recordings = [
+        RecentRecording(
+            file_name=f"{trigger}.mp4",
+            start_time=now,
+            end_time=now + timedelta(seconds=20),
+            trigger=trigger,
+        )
+        for trigger in ("people", "vehicle", "dog_cat", "other", "people,other")
+    ]
+
+    async def search(*_args):
+        return recordings
+
+    monkeypatch.setattr(monitor_module, "_search_file_info_recordings", search)
+    await monitor._publish_recent_recordings(
+        FakeHost(),
+        monitor._config.cameras[0],
+        "reolink_monitor/camera/garden_ch0/state",
+    )
+
+    states = {topic.rsplit("/", 1)[-1]: payload for topic, payload, _ in publisher.messages}
+    assert states["recent_recordings"] == "4"
+    filtered = json.loads(states["attributes"])["recordings"]
+    assert {recording["file_name"] for recording in filtered} == {
+        "people.mp4",
+        "vehicle.mp4",
+        "dog_cat.mp4",
+        "people,other.mp4",
+    }
+
+
 def test_one_time_lookback_requires_positive_integer():
     monitor, publisher = configured_monitor(FakeHost())
     monitor._one_time_lookback = 1440
@@ -289,6 +330,109 @@ def test_one_time_lookback_requires_positive_integer():
     assert monitor._set_one_time_lookback("525601") is None
 
 
+def test_one_time_recording_types_publish_confirmed_state():
+    monitor, publisher = configured_monitor(FakeHost())
+    monitor._config = AppConfig(
+        mqtt=monitor._config.mqtt,
+        cameras=monitor._config.cameras,
+        recent_recordings_types=("person",),
+    )
+    monitor._one_time_recording_types = ("person",)
+
+    assert monitor._set_one_time_recording_types("vehicle, animal,vehicle") == (
+        "vehicle",
+        "animal",
+    )
+    assert publisher.messages[-1] == (
+        "reolink_monitor/bridge/onetime_recording_types/state",
+        "vehicle,animal",
+        True,
+    )
+    assert monitor._set_one_time_recording_types("unknown") is None
+    assert monitor._one_time_recording_types == ("vehicle", "animal")
+    assert publisher.messages[-1] == (
+        "reolink_monitor/bridge/onetime_recording_types/state",
+        "vehicle,animal",
+        True,
+    )
+    assert monitor._set_one_time_recording_types("all") == ()
+    assert publisher.messages[-1][1] == "all"
+
+
+@pytest.mark.asyncio
+async def test_set_commands_update_state_and_override_next_button_scrape():
+    monitor, publisher = configured_monitor(FakeHost())
+    monitor._config = AppConfig(
+        mqtt=monitor._config.mqtt,
+        cameras=monitor._config.cameras,
+        poll_interval_seconds=3600,
+        recent_recordings_lookback_minutes=90,
+        recent_recordings_types=("person",),
+    )
+    command_queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    state_updates: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    scrape_arguments: asyncio.Queue[tuple[int | None, tuple[str, ...] | None]] = (
+        asyncio.Queue()
+    )
+    original_publish = publisher.publish
+
+    def publish(topic, payload, retain=True):
+        original_publish(topic, payload, retain)
+        if topic.endswith(
+            ("/onetime_lookback_minutes/state", "/onetime_recording_types/state")
+        ):
+            state_updates.put_nowait((topic, payload))
+
+    async def poll_all(lookback_minutes, recording_types):
+        scrape_arguments.put_nowait((lookback_minutes, recording_types))
+        return ()
+
+    publisher.publish = publish
+    monitor.poll_all = poll_all
+    run_task = asyncio.create_task(monitor.run(command_queue))
+
+    async def wait_for_state(topic, payload):
+        while await asyncio.wait_for(state_updates.get(), timeout=1) != (topic, payload):
+            continue
+
+    try:
+        assert await asyncio.wait_for(scrape_arguments.get(), timeout=1) == (
+            90,
+            ("person",),
+        )
+        command_queue.put_nowait(
+            ("reolink_monitor/bridge/onetime_lookback_minutes/set", "60")
+        )
+        await wait_for_state(
+            "reolink_monitor/bridge/onetime_lookback_minutes/state",
+            "60",
+        )
+        command_queue.put_nowait(
+            ("reolink_monitor/bridge/onetime_recording_types/set", "vehicle,animal")
+        )
+        await wait_for_state(
+            "reolink_monitor/bridge/onetime_recording_types/state",
+            "vehicle,animal",
+        )
+        command_queue.put_nowait(("reolink_monitor/bridge/scrape/trigger", "PRESS"))
+        assert await asyncio.wait_for(scrape_arguments.get(), timeout=1) == (
+            60,
+            ("vehicle", "animal"),
+        )
+        await wait_for_state(
+            "reolink_monitor/bridge/onetime_lookback_minutes/state",
+            "90",
+        )
+        await wait_for_state(
+            "reolink_monitor/bridge/onetime_recording_types/state",
+            "person",
+        )
+    finally:
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task
+
+
 @pytest.mark.asyncio
 async def test_scrape_publishes_final_status_and_event(monkeypatch):
     monitor, publisher = configured_monitor(FakeHost())
@@ -299,7 +443,7 @@ async def test_scrape_publishes_final_status_and_event(monkeypatch):
         started_at=datetime.now().astimezone(),
     )
 
-    async def poll_all(lookback_minutes):
+    async def poll_all(lookback_minutes, _recording_types):
         assert lookback_minutes == 60
         return ("Garden",)
 
@@ -341,7 +485,7 @@ async def test_button_during_interval_marks_current_scrape_both_without_overlap(
         if topic == "reolink_monitor/bridge/scrape/finished":
             scrape_finished.set()
 
-    async def poll_all(_lookback_minutes):
+    async def poll_all(_lookback_minutes, _recording_types):
         nonlocal poll_count
         poll_count += 1
         scrape_started.set()
@@ -404,7 +548,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
         monitor.publish_discovery()
 
     assert (
-        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (12 entities total)"
+        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (13 entities total)"
         in caplog.text
     )
     bridge_topic, bridge_payload, retained = publisher.messages[0]
@@ -469,6 +613,16 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     assert lookback["retain"] is False
     assert lookback["min"] == 1
     assert lookback["max"] == 525600
+    recording_types = discovery[
+        "homeassistant/text/reolink_monitor/onetime_recording_types/config"
+    ]
+    assert recording_types["state_topic"] == (
+        "reolink_monitor/bridge/onetime_recording_types/state"
+    )
+    assert recording_types["command_topic"] == (
+        "reolink_monitor/bridge/onetime_recording_types/set"
+    )
+    assert recording_types["mode"] == "text"
     button = discovery["homeassistant/button/reolink_monitor/scrape_now/config"]
     assert button["command_topic"] == "reolink_monitor/bridge/scrape/trigger"
     assert button["retain"] is False

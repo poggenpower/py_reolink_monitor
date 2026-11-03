@@ -38,6 +38,7 @@ def test_load_config_resolves_environment_and_parses_camera(tmp_path, monkeypatc
     assert config.cameras[0].channel == 0
     assert config.poll_interval_seconds == 300
     assert config.recent_recordings_lookback_minutes == 1440
+    assert config.recent_recordings_types == ()
     assert config.mqtt.client_id == "reolink_monitor"
     assert config.state_prefix == "reolink_monitor"
     assert "secret" not in repr(config)
@@ -133,6 +134,64 @@ def test_load_config_parses_recent_recordings_lookback_minutes(tmp_path):
     config = load_config(path)
 
     assert config.recent_recordings_lookback_minutes == 90
+
+
+def test_load_config_parses_recent_recording_types_case_insensitively(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        textwrap.dedent(
+            """
+            recent_recordings_types:
+              - Person
+              - vehicle
+              - person
+            mqtt:
+              host: mqtt.local
+            cameras:
+              - name: Side Gate
+                host: 192.0.2.12
+                username: admin
+                password: secret
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.recent_recordings_types == ("person", "vehicle")
+
+
+@pytest.mark.parametrize(
+    "recording_types",
+    ["person", ["unknown"], ["person", "wildlife"], [1]],
+)
+def test_config_rejects_invalid_recent_recording_types(tmp_path, recording_types):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        textwrap.dedent(
+            f"""
+            recent_recordings_types: {recording_types}
+            mqtt:
+              host: mqtt.local
+            cameras:
+              - name: Side Gate
+                host: 192.0.2.12
+                username: admin
+                password: secret
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    expected_error = (
+        TypeError
+        if not isinstance(recording_types, list)
+        or any(not isinstance(value, str) for value in recording_types)
+        else ValueError
+    )
+    with pytest.raises(expected_error, match="recent_recordings_types"):
+        load_config(path)
 
 
 @pytest.mark.parametrize("lookback", [0, -1, "invalid"])

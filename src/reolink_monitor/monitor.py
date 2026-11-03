@@ -18,7 +18,7 @@ from reolink_aio.api import Host
 from reolink_aio.enums import ConnectionEnum
 from reolink_aio.exceptions import ReolinkError, UnexpectedDataError
 
-from .config import AppConfig, CameraConfig
+from .config import RECENT_RECORDING_TYPES, AppConfig, CameraConfig
 
 _LOGGER = logging.getLogger(__name__)
 _BATTERY_STATUS = {0: "discharging", 1: "charging", 2: "charged"}
@@ -52,6 +52,12 @@ _FILE_RECORD_OPTIONS = (
     "nonmotorveh",
     "IPCInputOutput",
 )
+_RECORDING_TYPE_TRIGGERS = {
+    "person": {"person", "people", "face"},
+    "other": {"other"},
+    "vehicle": {"vehicle", "nonmotorveh"},
+    "animal": {"animal", "dog_cat", "dog", "cat"},
+}
 
 
 class Publisher(Protocol):
@@ -106,6 +112,7 @@ class ScrapeRun:
     trigger: str
     lookback_minutes: int
     started_at: datetime
+    recording_types: tuple[str, ...] = ()
 
 
 def _recording_search_xml(
@@ -304,6 +311,7 @@ class BatteryMonitor:
         self._config = config
         self._publisher = publisher
         self._host_factory = host_factory
+        self._one_time_recording_types = config.recent_recordings_types
 
     def _identity(self, camera: CameraConfig) -> str:
         return f"{_slug(camera.name)}_ch{camera.channel}"
@@ -322,7 +330,7 @@ class BatteryMonitor:
             "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
             "(%d entities total)",
             len(self._config.cameras),
-            len(self._config.cameras) * 5 + 7,
+            len(self._config.cameras) * 5 + 8,
         )
         bridge_topic = (
             f"{self._config.discovery_prefix}/binary_sensor/"
@@ -440,6 +448,28 @@ class BatteryMonitor:
                 retain=True,
             )
 
+        recording_types_root = f"{bridge_root}/onetime_recording_types"
+        self._publisher.publish(
+            f"{self._config.discovery_prefix}/text/"
+            "reolink_monitor/onetime_recording_types/config",
+            json.dumps(
+                {
+                    "name": "One-time Recording Types",
+                    "unique_id": "reolink_monitor_onetime_recording_types",
+                    "state_topic": f"{recording_types_root}/state",
+                    "command_topic": f"{recording_types_root}/set",
+                    "retain": False,
+                    "min": 1,
+                    "max": 40,
+                    "mode": "text",
+                    "availability_topic": availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                    "device": controls_device,
+                }
+            ),
+            retain=True,
+        )
         lookback_root = f"{bridge_root}/onetime_lookback_minutes"
         self._publisher.publish(
             f"{self._config.discovery_prefix}/number/reolink_monitor/onetime_lookback/config",
@@ -609,7 +639,10 @@ class BatteryMonitor:
         )
 
     async def poll_camera(
-        self, camera: CameraConfig, lookback_minutes: float | None = None
+        self,
+        camera: CameraConfig,
+        lookback_minutes: float | None = None,
+        recording_types: tuple[str, ...] | None = None,
     ) -> bool:
         host = await self._connect_camera(camera)
         try:
@@ -628,7 +661,7 @@ class BatteryMonitor:
                 f"{state_root}/battery_status", status, retain=False
             )
             recordings_ok = await self._publish_recent_recordings(
-                host, camera, state_root, lookback_minutes
+                host, camera, state_root, lookback_minutes, recording_types
             )
             scraped_at = datetime.now().astimezone()
             self._publisher.publish(
@@ -652,6 +685,7 @@ class BatteryMonitor:
         camera: CameraConfig,
         state_root: str,
         lookback_minutes: float | None = None,
+        recording_types: tuple[str, ...] | None = None,
     ) -> bool:
         lookback_minutes = (
             self._config.recent_recordings_lookback_minutes
@@ -661,6 +695,11 @@ class BatteryMonitor:
         # The camera can timestamp clips a few minutes ahead of this host.
         end = datetime.now(host.timezone()) + timedelta(minutes=5)
         start = end - timedelta(minutes=lookback_minutes)
+        recording_types = (
+            self._config.recent_recordings_types
+            if recording_types is None
+            else recording_types
+        )
         _LOGGER.debug(
             "%s searching recordings for channel %d stream %s from %s to %s",
             camera.name,
@@ -683,6 +722,19 @@ class BatteryMonitor:
             )
             return False
 
+        if recording_types:
+            allowed_triggers = set().union(
+                *(_RECORDING_TYPE_TRIGGERS[recording_type] for recording_type in recording_types)
+            )
+            recordings = [
+                recording
+                for recording in recordings
+                if {
+                    trigger.strip().lower()
+                    for trigger in recording.trigger.split(",")
+                }
+                & allowed_triggers
+            ]
         total_count = len(recordings)
         recent = sorted(
             recordings, key=lambda recording: recording.start_time, reverse=True
@@ -717,11 +769,15 @@ class BatteryMonitor:
         )
         return True
 
-    async def poll_all(self, lookback_minutes: float | None = None) -> tuple[str, ...]:
+    async def poll_all(
+        self,
+        lookback_minutes: float | None = None,
+        recording_types: tuple[str, ...] | None = None,
+    ) -> tuple[str, ...]:
         failed_cameras = []
         for camera in self._config.cameras:
             try:
-                if not await self.poll_camera(camera, lookback_minutes):
+                if not await self.poll_camera(camera, lookback_minutes, recording_types):
                     failed_cameras.append(camera.name)
             except Exception:
                 _LOGGER.exception("Failed to poll Reolink camera %s", camera.name)
@@ -747,6 +803,40 @@ class BatteryMonitor:
             str(self._one_time_lookback),
             retain=True,
         )
+
+    def _publish_one_time_recording_types(self) -> None:
+        value = ",".join(self._one_time_recording_types) or "all"
+        self._publisher.publish(
+            f"{self._config.state_prefix}/bridge/onetime_recording_types/state",
+            value,
+            retain=True,
+        )
+
+    def _set_one_time_recording_types(self, payload: str) -> tuple[str, ...] | None:
+        normalized = payload.strip().lower()
+        if normalized == "all":
+            value = ()
+        else:
+            requested_types = [
+                recording_type.strip() for recording_type in normalized.split(",")
+            ]
+            if (
+                not normalized
+                or any(not recording_type for recording_type in requested_types)
+                or any(
+                    recording_type not in RECENT_RECORDING_TYPES
+                    for recording_type in requested_types
+                )
+            ):
+                _LOGGER.warning(
+                    "Ignoring invalid set_onetime_recording_types payload: %s", payload
+                )
+                self._publish_one_time_recording_types()
+                return None
+            value = tuple(dict.fromkeys(requested_types))
+        self._one_time_recording_types = value
+        self._publish_one_time_recording_types()
+        return value
 
     def _set_one_time_lookback(self, payload: str) -> int | None:
         normalized = payload.strip()
@@ -778,11 +868,15 @@ class BatteryMonitor:
             "run_id": run.run_id,
             "trigger": run.trigger,
             "lookback_minutes": run.lookback_minutes,
+            "recording_types": run.recording_types or ["all"],
             "started_at": run.started_at.isoformat(),
         }
         self._publish_scrape_status("running", attributes)
         try:
-            failed_cameras = await self.poll_all(run.lookback_minutes)
+            failed_cameras = await self.poll_all(
+                run.lookback_minutes,
+                run.recording_types,
+            )
         except asyncio.CancelledError:
             finished_at = datetime.now().astimezone()
             attributes.update(
@@ -838,7 +932,9 @@ class BatteryMonitor:
         self.publish_discovery()
         self.publish_metadata()
         self._one_time_lookback = self._config.recent_recordings_lookback_minutes
+        self._one_time_recording_types = self._config.recent_recordings_types
         self._publish_one_time_lookback()
+        self._publish_one_time_recording_types()
         self._publish_scrape_status("idle", {})
         loop = asyncio.get_running_loop()
         next_interval = loop.time()
@@ -853,6 +949,7 @@ class BatteryMonitor:
                         trigger="interval",
                         lookback_minutes=self._config.recent_recordings_lookback_minutes,
                         started_at=datetime.now().astimezone(),
+                        recording_types=self._config.recent_recordings_types,
                     )
                     scrape_task = asyncio.create_task(self._run_scrape(active_run))
                     next_interval = loop.time() + self._config.poll_interval_seconds
@@ -897,6 +994,8 @@ class BatteryMonitor:
                     command = topic.removeprefix(expected_prefix)
                     if command == "onetime_lookback_minutes/set":
                         self._set_one_time_lookback(payload)
+                    elif command == "onetime_recording_types/set":
+                        self._set_one_time_recording_types(payload)
                     elif command == "scrape/trigger":
                         if payload.strip() != "PRESS":
                             _LOGGER.warning("Ignoring invalid scrape_now payload: %s", payload)
@@ -910,6 +1009,9 @@ class BatteryMonitor:
                                         "run_id": active_run.run_id,
                                         "trigger": active_run.trigger,
                                         "lookback_minutes": active_run.lookback_minutes,
+                                        "recording_types": (
+                                            active_run.recording_types or ["all"]
+                                        ),
                                         "started_at": active_run.started_at.isoformat(),
                                     },
                                 )
@@ -919,11 +1021,16 @@ class BatteryMonitor:
                                 trigger="button",
                                 lookback_minutes=self._one_time_lookback,
                                 started_at=datetime.now().astimezone(),
+                                recording_types=self._one_time_recording_types,
                             )
                             self._one_time_lookback = (
                                 self._config.recent_recordings_lookback_minutes
                             )
                             self._publish_one_time_lookback()
+                            self._one_time_recording_types = (
+                                self._config.recent_recordings_types
+                            )
+                            self._publish_one_time_recording_types()
                             scrape_task = asyncio.create_task(self._run_scrape(active_run))
                     else:
                         _LOGGER.warning("Ignoring unsupported MQTT command: %s", command)

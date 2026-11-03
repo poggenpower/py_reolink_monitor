@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+RECENT_RECORDING_TYPES = ("person", "other", "vehicle", "animal")
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class AppConfig:
     discovery_prefix: str = "homeassistant"
     state_prefix: str = "reolink_monitor"
     recent_recordings_lookback_minutes: int = 1440
+    recent_recordings_types: tuple[str, ...] = ()
 
 
 def _expand_environment(value: Any) -> Any:
@@ -214,6 +216,24 @@ def load_config(path: str | Path, *, require_mqtt: bool = True) -> AppConfig:
         "recent_recordings_lookback_minutes",
         1,
     )
+    recording_types = raw.get("recent_recordings_types", [])
+    if not isinstance(recording_types, list):
+        raise TypeError("'recent_recordings_types' must be a list")
+    normalized_recording_types = []
+    for recording_type in recording_types:
+        if not isinstance(recording_type, str):
+            raise TypeError(
+                "'recent_recordings_types' entries must be one of "
+                + ", ".join(RECENT_RECORDING_TYPES)
+            )
+        normalized_type = recording_type.strip().lower()
+        if normalized_type not in RECENT_RECORDING_TYPES:
+            raise ValueError(
+                f"'recent_recordings_types' entries must be one of "
+                f"{', '.join(RECENT_RECORDING_TYPES)}"
+            )
+        if normalized_type not in normalized_recording_types:
+            normalized_recording_types.append(normalized_type)
     discovery_prefix = _require_nonempty_string(
         raw.get("discovery_prefix", "homeassistant"), "discovery_prefix"
     )
@@ -225,6 +245,7 @@ def load_config(path: str | Path, *, require_mqtt: bool = True) -> AppConfig:
         cameras=tuple(cameras),
         poll_interval_seconds=poll_interval,
         recent_recordings_lookback_minutes=recent_recordings_lookback_minutes,
+        recent_recordings_types=tuple(normalized_recording_types),
         discovery_prefix=discovery_prefix.strip("/"),
         state_prefix=state_prefix.strip("/"),
     )

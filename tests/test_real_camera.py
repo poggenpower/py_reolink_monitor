@@ -35,7 +35,11 @@ async def test_first_configured_real_camera_poll(caplog):
     monitor = BatteryMonitor(config, publisher)
     caplog.set_level(logging.DEBUG, logger="reolink_monitor.monitor")
 
-    await monitor.poll_camera(camera)
+    await monitor.poll_camera(
+        camera,
+        lookback_minutes=30 * 24 * 60,
+        recording_types=("animal",),
+    )
 
     identity = re.sub(r"[^a-z0-9]+", "_", camera.name.lower()).strip("_")
     state_root = f"{config.state_prefix}/camera/{identity}_ch{camera.channel}/state"
@@ -51,6 +55,12 @@ async def test_first_configured_real_camera_poll(caplog):
     recordings = json.loads(publisher.messages[f"{state_root}/recent_recordings/attributes"])
     assert isinstance(recordings["recordings"], list)
     assert 0 < len(recordings["recordings"]) <= 10, (
-        f"{camera.name} returned no recordings in the last 24 hours; "
+        f"{camera.name} returned no animal recordings in the last 30 days; "
         f"monitor logs: {caplog.text}"
     )
+    for recording in recordings["recordings"]:
+        trigger_set = {
+            trigger.strip() for trigger in recording["trigger"].lower().split(",")
+        }
+        assert trigger_set <= {"animal", "dog_cat", "dog", "cat", "other"}
+        assert trigger_set & {"animal", "dog_cat", "dog", "cat"}

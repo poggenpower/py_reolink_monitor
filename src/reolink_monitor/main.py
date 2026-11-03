@@ -39,6 +39,7 @@ async def _run(config_path: Path, mode: str, *, mqtt_insecure: bool = False) -> 
     publisher.subscribe_commands(
         (
             f"{bridge_root}/onetime_lookback_minutes/set",
+            f"{bridge_root}/onetime_recording_types/set",
             f"{bridge_root}/scrape/trigger",
         ),
         enqueue_command,
