@@ -4,7 +4,7 @@
   "postCreateCommand": "pip install -e '.[dev]'",
   "forwardPorts": [1883],
   "appPort": [
-    "30000-48000:30000-48000/udp"
+    "44230-44240:44230-44240/udp"
     ],
   "customizations": {
     "vscode": {
