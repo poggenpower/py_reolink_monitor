@@ -37,8 +37,8 @@ async def test_first_configured_real_camera_poll(caplog):
 
     await monitor.poll_camera(
         camera,
-        lookback_minutes=30 * 24 * 60,
-        recording_types=("animal",),
+        lookback_minutes=120,
+        recording_types=("person",),
     )
 
     identity = re.sub(r"[^a-z0-9]+", "_", camera.name.lower()).strip("_")
@@ -55,12 +55,12 @@ async def test_first_configured_real_camera_poll(caplog):
     recordings = json.loads(publisher.messages[f"{state_root}/recent_recordings/attributes"])
     assert isinstance(recordings["recordings"], list)
     assert 0 < len(recordings["recordings"]) <= 10, (
-        f"{camera.name} returned no animal recordings in the last 30 days; "
+        f"{camera.name} returned no person recordings in the last 120 minutes; "
         f"monitor logs: {caplog.text}"
     )
     for recording in recordings["recordings"]:
         trigger_set = {
             trigger.strip() for trigger in recording["trigger"].lower().split(",")
         }
-        assert trigger_set <= {"animal", "dog_cat", "dog", "cat", "other"}
-        assert trigger_set & {"animal", "dog_cat", "dog", "cat"}
+        assert trigger_set <= {"person", "people", "face", "other"}
+        assert trigger_set & {"person", "people", "face"}
