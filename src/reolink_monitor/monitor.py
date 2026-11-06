@@ -9,7 +9,7 @@ import logging
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta, tzinfo
+from datetime import UTC, datetime, time, timedelta, timezone, tzinfo
 from typing import Protocol
 from uuid import uuid4
 from xml.etree import ElementTree as XML
@@ -26,6 +26,7 @@ _UDP_LOCAL_PORT: ContextVar[int | None] = ContextVar("baichuan_udp_local_port", 
 _UDP_CONNECTION_PATCHED = False
 _RECENT_RECORDING_LIMIT = 10
 _RECORDING_STREAM = "main"
+_CMD_GET_SYSTEM_GENERAL = 104
 _FILE_INFO_PAGE_SIZE = 40
 _FILE_INFO_MAX_PAGES = 50
 _FILE_RECORD_TYPES = (
@@ -81,7 +82,7 @@ class CameraHost(Protocol):
 
     async def get_states(self) -> None: ...
 
-    def timezone(self) -> tzinfo: ...
+    def timezone(self) -> tzinfo | None: ...
 
     def camera_uid(self, channel: int) -> str: ...
 
@@ -104,6 +105,15 @@ class RecentRecording:
     @property
     def duration(self) -> timedelta:
         return self.end_time - self.start_time
+
+
+@dataclass(frozen=True)
+class CameraClock:
+    device_time: datetime
+    server_time_utc: datetime
+    timezone_setting: str | None
+    utc_offset_seconds: int
+    timezone: tzinfo
 
 
 @dataclass
@@ -201,6 +211,48 @@ def _parse_recording_page(response: str, timezone: tzinfo | None) -> list[Recent
             )
         )
     return recordings
+
+
+def _parse_camera_clock(response: str, server_time_utc: datetime) -> CameraClock:
+    try:
+        root = XML.fromstring(response)
+    except XML.ParseError as err:
+        raise UnexpectedDataError("Baichuan returned malformed SystemGeneral XML") from err
+
+    system_general = root.find(".//SystemGeneral")
+    if system_general is None:
+        raise UnexpectedDataError("Baichuan SystemGeneral response is missing its settings")
+    try:
+        device_time = datetime(
+            year=int(system_general.findtext("year", "")),
+            month=int(system_general.findtext("month", "")),
+            day=int(system_general.findtext("day", "")),
+            hour=int(system_general.findtext("hour", "")),
+            minute=int(system_general.findtext("minute", "")),
+            second=int(system_general.findtext("second", "")),
+        )
+    except ValueError as err:
+        raise UnexpectedDataError(
+            "Baichuan SystemGeneral response contains an invalid camera time"
+        ) from err
+
+    offset_seconds = round(
+        (device_time - server_time_utc.replace(tzinfo=None)).total_seconds() / 60
+    ) * 60
+    try:
+        device_timezone = timezone(timedelta(seconds=offset_seconds))
+    except ValueError as err:
+        raise UnexpectedDataError(
+            "Baichuan camera time differs from server time by an invalid timezone offset"
+        ) from err
+
+    return CameraClock(
+        device_time=device_time,
+        server_time_utc=server_time_utc,
+        timezone_setting=system_general.findtext("timeZone"),
+        utc_offset_seconds=offset_seconds,
+        timezone=device_timezone,
+    )
 
 
 async def _search_file_info_recordings(
@@ -312,6 +364,7 @@ class BatteryMonitor:
         self._publisher = publisher
         self._host_factory = host_factory
         self._one_time_recording_types = config.recent_recordings_types
+        self._camera_clocks: dict[str, CameraClock | None] = {}
 
     def _identity(self, camera: CameraConfig) -> str:
         return f"{_slug(camera.name)}_ch{camera.channel}"
@@ -330,7 +383,7 @@ class BatteryMonitor:
             "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
             "(%d entities total)",
             len(self._config.cameras),
-            len(self._config.cameras) * 5 + 8,
+            len(self._config.cameras) * 6 + 8,
         )
         bridge_topic = (
             f"{self._config.discovery_prefix}/binary_sensor/"
@@ -421,6 +474,28 @@ class BatteryMonitor:
                     **attributes,
                 }
                 self._publisher.publish(topic, json.dumps(payload), retain=True)
+
+            clock_topic = f"{state_root}/clock_offset"
+            self._publisher.publish(
+                f"{self._config.discovery_prefix}/sensor/"
+                f"reolink_monitor/{identity}_camera_clock_offset/config",
+                json.dumps(
+                    {
+                        "name": f"{camera.name} Camera Clock Offset",
+                        "unique_id": f"reolink_monitor_{identity}_camera_clock_offset",
+                        "state_topic": clock_topic,
+                        "json_attributes_topic": f"{clock_topic}/attributes",
+                        "unit_of_measurement": "s",
+                        "entity_category": "diagnostic",
+                        "availability_topic": availability_topic,
+                        "payload_available": "online",
+                        "payload_not_available": "offline",
+                        "device": device,
+                        "expire_after": self._config.poll_interval_seconds * 3,
+                    }
+                ),
+                retain=True,
+            )
 
         controls_device = bridge_device
         metadata_root = f"{bridge_root}/metadata"
@@ -572,6 +647,53 @@ class BatteryMonitor:
                 except (OSError, ReolinkError, TimeoutError) as err:
                     _LOGGER.warning("Baichuan connection cleanup failed: %s", err)
 
+    def _publish_camera_clock(
+        self, camera: CameraConfig, clock: CameraClock | None
+    ) -> None:
+        topic = f"{self._camera_state_root(camera)}/clock_offset"
+        if clock is None:
+            state = "unknown"
+            attributes = {"status": "unavailable"}
+        else:
+            state = str(clock.utc_offset_seconds)
+            attributes = {
+                "status": "available",
+                "camera_time": clock.device_time.replace(tzinfo=clock.timezone).isoformat(),
+                "server_time_utc": clock.server_time_utc.isoformat(),
+                "timezone_setting": clock.timezone_setting,
+            }
+        self._publisher.publish(topic, state, retain=False)
+        self._publisher.publish(
+            f"{topic}/attributes", json.dumps(attributes), retain=False
+        )
+
+    async def _ensure_camera_clock(
+        self, host: CameraHost, camera: CameraConfig
+    ) -> CameraClock | None:
+        identity = self._identity(camera)
+        if identity in self._camera_clocks:
+            return self._camera_clocks[identity]
+
+        before = datetime.now(UTC)
+        try:
+            response = await host.baichuan.send(cmd_id=_CMD_GET_SYSTEM_GENERAL)
+            after = datetime.now(UTC)
+            clock = _parse_camera_clock(response, before + (after - before) / 2)
+        except (ReolinkError, OSError, TimeoutError, ValueError) as err:
+            _LOGGER.warning("Could not retrieve camera clock for %s: %s", camera.name, err)
+            self._publish_camera_clock(camera, None)
+            return None
+
+        self._camera_clocks[identity] = clock
+        self._publish_camera_clock(camera, clock)
+        _LOGGER.info(
+            "%s camera clock offset from UTC is %d seconds (camera timezone setting: %s)",
+            camera.name,
+            clock.utc_offset_seconds,
+            clock.timezone_setting or "unknown",
+        )
+        return clock
+
     async def _connect_camera(self, camera: CameraConfig) -> CameraHost:
         kwargs: dict[str, object] = {"timeout": camera.connection_timeout_seconds}
         if camera.uid:
@@ -646,6 +768,7 @@ class BatteryMonitor:
     ) -> bool:
         host = await self._connect_camera(camera)
         try:
+            await self._ensure_camera_clock(host, camera)
             await host.get_states()
             percentage = host.battery_percentage(camera.channel)
             status_code = host.battery_status(camera.channel)
@@ -692,8 +815,11 @@ class BatteryMonitor:
             if lookback_minutes is None
             else lookback_minutes
         )
-        # The camera can timestamp clips a few minutes ahead of this host.
-        end = datetime.now(host.timezone()) + timedelta(minutes=5)
+        clock = self._camera_clocks.get(self._identity(camera))
+        if clock is None:
+            end = datetime.now(host.timezone()) + timedelta(minutes=5)
+        else:
+            end = datetime.now(UTC).astimezone(clock.timezone) + timedelta(minutes=5)
         start = end - timedelta(minutes=lookback_minutes)
         recording_types = (
             self._config.recent_recordings_types

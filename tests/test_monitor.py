@@ -70,9 +70,10 @@ class FakeHost:
 
 
 class FakeBaichuan:
-    def __init__(self, pages=None, error=None):
+    def __init__(self, pages=None, error=None, clock_response=None):
         self.pages = list(pages or [])
         self.error = error
+        self.clock_response = clock_response
         self.commands: list[tuple[int, str]] = []
         self._connection = None
 
@@ -80,6 +81,10 @@ class FakeBaichuan:
         self.commands.append((cmd_id, body))
         if self.error:
             raise self.error
+        if cmd_id == 104:
+            return self.clock_response or camera_clock_response(
+                datetime.now(UTC).replace(tzinfo=None)
+            )
         if cmd_id == 14:
             return "<body><FileInfoList><FileInfo><handle>search-1</handle></FileInfo></FileInfoList></body>"
         if cmd_id == 15:
@@ -115,6 +120,15 @@ def file_info_page(recordings):
                 ("second", value.second),
             ):
                 XML.SubElement(time_element, field).text = str(field_value)
+    return XML.tostring(root, encoding="unicode")
+
+
+def camera_clock_response(device_time, timezone_setting="0"):
+    root = XML.Element("body")
+    system_general = XML.SubElement(root, "SystemGeneral")
+    XML.SubElement(system_general, "timeZone").text = timezone_setting
+    for field in ("year", "month", "day", "hour", "minute", "second"):
+        XML.SubElement(system_general, field).text = str(getattr(device_time, field))
     return XML.tostring(root, encoding="unicode")
 
 
@@ -236,19 +250,72 @@ async def test_poll_publishes_battery_and_charging_status_and_logs_out():
     assert scraped_at.tzinfo is not None
     assert scraped_at.utcoffset() == datetime.now().astimezone().utcoffset()
     assert int(scraped_at.timestamp()) == int(messages["scraped_at_unix"])
-    assert all(not retained for _, _, retained in publisher.messages)
+    assert any(
+        topic == "reolink_monitor/camera/garden_ch0/state/clock_offset"
+        and not retained
+        for topic, _, retained in publisher.messages
+    )
     commands = host.baichuan.commands
-    assert [cmd_id for cmd_id, _ in commands[:3]] == [14, 15, 16]
+    assert [cmd_id for cmd_id, _ in commands[:4]] == [104, 14, 15, 16]
     assert [cmd_id for cmd_id, _ in commands[-3:]] == [14, 15, 16]
-    open_query = XML.fromstring(host.baichuan.commands[0][1]).find(".//FileInfo")
+    assert commands.count((104, "")) == 1
+    open_query = XML.fromstring(host.baichuan.commands[1][1]).find(".//FileInfo")
     assert open_query is not None
     assert open_query.findtext("uid") == "CAMERA"
     assert open_query.findtext("channelId") == "0"
     assert open_query.findtext("streamType") == "mainStream"
     assert len(open_query.findall("./fileRecordType/i")) > 10
-    assert XML.fromstring(host.baichuan.commands[1][1]).findtext(".//handle") == "search-1"
     assert XML.fromstring(host.baichuan.commands[2][1]).findtext(".//handle") == "search-1"
+    assert XML.fromstring(host.baichuan.commands[3][1]).findtext(".//handle") == "search-1"
     assert host.logged_out
+
+
+@pytest.mark.asyncio
+async def test_cached_camera_clock_offsets_recording_window_and_is_published(monkeypatch):
+    device_time = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+    host = FakeHost()
+    host.baichuan.clock_response = camera_clock_response(device_time, "3600")
+    monitor, publisher = configured_monitor(host)
+    windows = []
+
+    async def search(_host, _camera, start, end):
+        windows.append((start, end))
+        return []
+
+    monkeypatch.setattr(monitor_module, "_search_file_info_recordings", search)
+    camera = monitor._config.cameras[0]
+    await monitor.poll_camera(camera)
+    await monitor.poll_camera(camera)
+
+    assert len(windows) == 2
+    assert windows[0][1].utcoffset() == timedelta(hours=1)
+    assert windows[1][1].utcoffset() == timedelta(hours=1)
+    assert abs(
+        (
+            windows[0][1].replace(tzinfo=None)
+            - timedelta(minutes=5)
+            - device_time
+        ).total_seconds()
+    ) < 60
+    assert host.baichuan.commands.count((104, "")) == 1
+
+    clock_message = next(
+        payload
+        for topic, payload, retained in publisher.messages
+        if topic == "reolink_monitor/camera/garden_ch0/state/clock_offset/attributes"
+        and not retained
+    )
+    clock = json.loads(clock_message)
+    assert clock["status"] == "available"
+    assert clock["timezone_setting"] == "3600"
+    assert datetime.fromisoformat(clock["camera_time"]).utcoffset() == timedelta(hours=1)
+    assert datetime.fromisoformat(clock["server_time_utc"]).utcoffset() == timedelta(0)
+    assert any(
+        topic == "reolink_monitor/camera/garden_ch0/state/clock_offset"
+        and payload == "3600"
+        and not retained
+        for topic, payload, retained in publisher.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -548,7 +615,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
         monitor.publish_discovery()
 
     assert (
-        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (13 entities total)"
+        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (14 entities total)"
         in caplog.text
     )
     bridge_topic, bridge_payload, retained = publisher.messages[0]
@@ -600,6 +667,15 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
     ]
     assert scraped_at_unix["state_topic"] == f"{camera_state_root}/scraped_at_unix"
     assert scraped_at_unix["unit_of_measurement"] == "s"
+    clock_offset = discovery[
+        "homeassistant/sensor/reolink_monitor/garden_ch0_camera_clock_offset/config"
+    ]
+    assert clock_offset["state_topic"] == f"{camera_state_root}/clock_offset"
+    assert clock_offset["unit_of_measurement"] == "s"
+    assert clock_offset["json_attributes_topic"] == (
+        f"{camera_state_root}/clock_offset/attributes"
+    )
+    assert clock_offset["device"]["via_device"] == "reolink_monitor_bridge"
 
     metadata = discovery["homeassistant/sensor/reolink_monitor/poll_interval_seconds/config"]
     assert metadata["state_topic"] == ("reolink_monitor/bridge/metadata/poll_interval_seconds")
@@ -710,9 +786,13 @@ async def test_poll_publishes_total_recording_count_and_latest_ten_details(caplo
     assert attributes["recordings"][0]["file_name"] == "clip_51.mp4"
     assert attributes["recordings"][-1]["file_name"] == "clip_42.mp4"
     assert attributes["recordings"][0]["trigger"] == "people"
-    assert all(not retained for _, _, retained in publisher.messages)
+    assert all(
+        not retained
+        for topic, _, retained in publisher.messages
+        if not topic.endswith("/clock")
+    )
     command_ids = [cmd_id for cmd_id, _ in host.baichuan.commands]
-    assert command_ids[:4] == [14, 15, 15, 16]
+    assert command_ids[:5] == [104, 14, 15, 15, 16]
     assert command_ids[-3:] == [14, 15, 16]
 
 
@@ -738,7 +818,11 @@ async def test_recording_search_uses_configured_lookback_window(monkeypatch):
 
     assert searched["end"] - searched["start"] == timedelta(minutes=37)
     assert publisher.messages[-2][1] == "0"
-    assert all(not retained for _, _, retained in publisher.messages)
+    assert all(
+        not retained
+        for topic, _, retained in publisher.messages
+        if not topic.endswith("/clock")
+    )
 
 
 @pytest.mark.asyncio
@@ -755,7 +839,23 @@ async def test_recording_search_failure_does_not_hide_battery_readings():
         "recordings": [],
         "error": "recording search timed out",
     }
-    assert all(not retained for _, _, retained in publisher.messages)
+    clock_state = next(
+        payload
+        for topic, payload, _retained in publisher.messages
+        if topic == "reolink_monitor/camera/garden_ch0/state/clock_offset"
+    )
+    assert clock_state == "unknown"
+    clock_attributes = next(
+        json.loads(payload)
+        for topic, payload, _retained in publisher.messages
+        if topic == "reolink_monitor/camera/garden_ch0/state/clock_offset/attributes"
+    )
+    assert clock_attributes == {"status": "unavailable"}
+    assert all(
+        not retained
+        for topic, _, retained in publisher.messages
+        if "/state/" in topic
+    )
 
 
 def test_publish_metadata_retains_configured_intervals():
