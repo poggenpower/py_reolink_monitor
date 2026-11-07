@@ -7,6 +7,7 @@
 - Validate commit subjects against the `[feat]`, `[fix]`, `[docs]`, and `[chore]` prefixes.
 - Generate release changelog entries from commit subjects when a version tag is pushed.
 - Build container images for both amd64 and arm64 platforms.
+- Publish each detected camera model to MQTT and as the Home Assistant device model and a diagnostic Model sensor.
 
 ### Documentation
 

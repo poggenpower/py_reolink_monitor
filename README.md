@@ -82,6 +82,7 @@ The monitor publishes a **Reolink Bridge** device with a connectivity diagnostic
 - Recent recordings (`sensor` count with a `recordings` attribute containing details for up to 10 clips from the configurable lookback window and type filter; each entry includes filename, start time, duration, and trigger). The sensor count reflects all matching recordings. The Baichuan file-list search includes scheduled as well as event-triggered recordings.
 - Camera Clock Offset (`sensor`, seconds): the measured difference between the camera's local clock and UTC, published at `camera/<camera_id>/state/clock_offset`. Its attributes are published at `camera/<camera_id>/state/clock_offset/attributes` and include the sampled camera time, server UTC time, and raw timezone setting reported by the camera.
 - Last scraped time (`sensor`, timestamp) and its Unix timestamp (`sensor`, seconds)
+- Camera model (`sensor`, diagnostic) published at `camera/<camera_id>/state/model`; `unknown` until the camera reports its model. The detected model is also set as the Home Assistant device model.
 
 Bridge topics are grouped under `<state_prefix>/bridge/`:
 
