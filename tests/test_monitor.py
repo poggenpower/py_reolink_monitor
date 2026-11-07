@@ -36,10 +36,12 @@ class FakeHost:
         fail: bool = False,
         pages: list[str] | None = None,
         error: Exception | None = None,
+        model: str = "RLC-810A",
     ):
         self.percentage = percentage
         self.status = status
         self.fail = fail
+        self.model = model
         self.logged_out = False
         self.baichuan = FakeBaichuan(pages=pages, error=error)
 
@@ -64,6 +66,10 @@ class FakeHost:
     def camera_uid(self, channel):
         assert channel == 0
         return "CAMERA_UID_0"
+
+    def camera_model(self, channel):
+        assert channel == 0
+        return self.model
 
     async def logout(self):
         self.logged_out = True
@@ -232,6 +238,55 @@ async def test_failed_connection_closes_udp_socket_before_retry():
     assert connected_host is host
     assert calls == 2
     assert connection.closed
+
+
+@pytest.mark.asyncio
+async def test_poll_publishes_camera_model_and_adds_it_to_ha_device():
+    monitor, publisher = configured_monitor(FakeHost(model="RLC-810A"))
+    monitor.publish_discovery()
+    publisher.messages.clear()
+
+    await monitor.poll_camera(monitor._config.cameras[0])
+
+    assert ("reolink_monitor/camera/garden_ch0/state/model", "RLC-810A", False) in (
+        publisher.messages
+    )
+    garden_devices = [
+        json.loads(payload)["device"]
+        for topic, payload, retained in publisher.messages
+        if topic.startswith("homeassistant/") and retained
+    ]
+    assert garden_devices
+    assert all(device["model"] == "RLC-810A" for device in garden_devices)
+
+
+@pytest.mark.asyncio
+async def test_unknown_camera_model_publishes_unknown_without_republishing_discovery():
+    monitor, publisher = configured_monitor(FakeHost(model="Unknown"))
+    monitor.publish_discovery()
+    publisher.messages.clear()
+
+    await monitor.poll_camera(monitor._config.cameras[0])
+
+    assert ("reolink_monitor/camera/garden_ch0/state/model", "unknown", False) in (
+        publisher.messages
+    )
+    assert not any(topic.startswith("homeassistant/") for topic, _, _ in publisher.messages)
+
+
+@pytest.mark.asyncio
+async def test_camera_model_discovery_is_not_republished_when_unchanged():
+    monitor, publisher = configured_monitor(FakeHost(model="RLC-810A"))
+    monitor.publish_discovery()
+    await monitor.poll_camera(monitor._config.cameras[0])
+    publisher.messages.clear()
+
+    await monitor.poll_camera(monitor._config.cameras[0])
+
+    assert ("reolink_monitor/camera/garden_ch0/state/model", "RLC-810A", False) in (
+        publisher.messages
+    )
+    assert not any(topic.startswith("homeassistant/") for topic, _, _ in publisher.messages)
 
 
 @pytest.mark.asyncio
@@ -615,7 +670,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
         monitor.publish_discovery()
 
     assert (
-        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (14 entities total)"
+        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (15 entities total)"
         in caplog.text
     )
     bridge_topic, bridge_payload, retained = publisher.messages[0]
@@ -743,6 +798,7 @@ def test_discovery_publishes_each_camera_under_its_own_ha_device():
         "recent_recordings",
         "scraped_at_iso",
         "scraped_at_unix",
+        "camera_model",
     ):
         topic = f"homeassistant/sensor/reolink_monitor/back_yard_ch1_{key}/config"
         assert topic in discovery
@@ -789,7 +845,7 @@ async def test_poll_publishes_total_recording_count_and_latest_ten_details(caplo
     assert all(
         not retained
         for topic, _, retained in publisher.messages
-        if not topic.endswith("/clock")
+        if not topic.endswith("/clock") and not topic.startswith("homeassistant/")
     )
     command_ids = [cmd_id for cmd_id, _ in host.baichuan.commands]
     assert command_ids[:5] == [104, 14, 15, 15, 16]
@@ -821,7 +877,7 @@ async def test_recording_search_uses_configured_lookback_window(monkeypatch):
     assert all(
         not retained
         for topic, _, retained in publisher.messages
-        if not topic.endswith("/clock")
+        if not topic.endswith("/clock") and not topic.startswith("homeassistant/")
     )
 
 

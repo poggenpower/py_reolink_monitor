@@ -15,6 +15,7 @@ from uuid import uuid4
 from xml.etree import ElementTree as XML
 
 from reolink_aio.api import Host
+from reolink_aio.const import UNKNOWN
 from reolink_aio.enums import ConnectionEnum
 from reolink_aio.exceptions import ReolinkError, UnexpectedDataError
 
@@ -26,6 +27,7 @@ _UDP_LOCAL_PORT: ContextVar[int | None] = ContextVar("baichuan_udp_local_port", 
 _UDP_CONNECTION_PATCHED = False
 _RECENT_RECORDING_LIMIT = 10
 _RECORDING_STREAM = "main"
+_BRIDGE_IDENTIFIER = "reolink_monitor_bridge"
 _CMD_GET_SYSTEM_GENERAL = 104
 _FILE_INFO_PAGE_SIZE = 40
 _FILE_INFO_MAX_PAGES = 50
@@ -85,6 +87,8 @@ class CameraHost(Protocol):
     def timezone(self) -> tzinfo | None: ...
 
     def camera_uid(self, channel: int) -> str: ...
+
+    def camera_model(self, channel: int | None) -> str: ...
 
     def battery_percentage(self, channel: int) -> int | None: ...
 
@@ -365,6 +369,7 @@ class BatteryMonitor:
         self._host_factory = host_factory
         self._one_time_recording_types = config.recent_recordings_types
         self._camera_clocks: dict[str, CameraClock | None] = {}
+        self._camera_models: dict[str, str | None] = {}
 
     def _identity(self, camera: CameraConfig) -> str:
         return f"{_slug(camera.name)}_ch{camera.channel}"
@@ -376,14 +381,14 @@ class BatteryMonitor:
         )
 
     def publish_discovery(self) -> None:
-        bridge_identifier = "reolink_monitor_bridge"
+        bridge_identifier = _BRIDGE_IDENTIFIER
         bridge_root = f"{self._config.state_prefix}/bridge"
         availability_topic = f"{bridge_root}/availability"
         _LOGGER.info(
             "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
             "(%d entities total)",
             len(self._config.cameras),
-            len(self._config.cameras) * 6 + 8,
+            len(self._config.cameras) * 7 + 8,
         )
         bridge_topic = (
             f"{self._config.discovery_prefix}/binary_sensor/"
@@ -408,94 +413,7 @@ class BatteryMonitor:
         self._publisher.publish(bridge_topic, json.dumps(bridge_payload), retain=True)
 
         for camera in self._config.cameras:
-            identity = self._identity(camera)
-            state_root = self._camera_state_root(camera)
-            device = {
-                "identifiers": [f"reolink_monitor_{identity}"],
-                "manufacturer": "Reolink",
-                "name": camera.name,
-                "via_device": bridge_identifier,
-            }
-            entities = (
-                (
-                    "battery",
-                    "Battery",
-                    {
-                        "device_class": "battery",
-                        "state_class": "measurement",
-                        "unit_of_measurement": "%",
-                    },
-                ),
-                (
-                    "battery_status",
-                    "Battery Status",
-                    {"entity_category": "diagnostic", "icon": "mdi:battery-charging"},
-                ),
-                (
-                    "recent_recordings",
-                    "Recent Recordings",
-                    {
-                        "entity_category": "diagnostic",
-                        "icon": "mdi:video-box",
-                        "json_attributes_topic": f"{state_root}/recent_recordings/attributes",
-                    },
-                ),
-                (
-                    "scraped_at_iso",
-                    "Last Scraped",
-                    {
-                        "device_class": "timestamp",
-                        "entity_category": "diagnostic",
-                    },
-                ),
-                (
-                    "scraped_at_unix",
-                    "Last Scraped (Unix)",
-                    {
-                        "unit_of_measurement": "s",
-                        "entity_category": "diagnostic",
-                    },
-                ),
-            )
-            for key, label, attributes in entities:
-                topic = (
-                    f"{self._config.discovery_prefix}/sensor/"
-                    f"reolink_monitor/{identity}_{key}/config"
-                )
-                payload = {
-                    "name": f"{camera.name} {label}",
-                    "unique_id": f"reolink_monitor_{identity}_{key}",
-                    "state_topic": f"{state_root}/{key}",
-                    "availability_topic": availability_topic,
-                    "payload_available": "online",
-                    "payload_not_available": "offline",
-                    "device": device,
-                    "expire_after": self._config.poll_interval_seconds * 3,
-                    **attributes,
-                }
-                self._publisher.publish(topic, json.dumps(payload), retain=True)
-
-            clock_topic = f"{state_root}/clock_offset"
-            self._publisher.publish(
-                f"{self._config.discovery_prefix}/sensor/"
-                f"reolink_monitor/{identity}_camera_clock_offset/config",
-                json.dumps(
-                    {
-                        "name": f"{camera.name} Camera Clock Offset",
-                        "unique_id": f"reolink_monitor_{identity}_camera_clock_offset",
-                        "state_topic": clock_topic,
-                        "json_attributes_topic": f"{clock_topic}/attributes",
-                        "unit_of_measurement": "s",
-                        "entity_category": "diagnostic",
-                        "availability_topic": availability_topic,
-                        "payload_available": "online",
-                        "payload_not_available": "offline",
-                        "device": device,
-                        "expire_after": self._config.poll_interval_seconds * 3,
-                    }
-                ),
-                retain=True,
-            )
+            self._publish_camera_discovery(camera)
 
         controls_device = bridge_device
         metadata_root = f"{bridge_root}/metadata"
@@ -621,6 +539,105 @@ class BatteryMonitor:
             retain=True,
         )
 
+    def _publish_camera_discovery(self, camera: CameraConfig) -> None:
+        identity = self._identity(camera)
+        state_root = self._camera_state_root(camera)
+        availability_topic = f"{self._config.state_prefix}/bridge/availability"
+        device = {
+            "identifiers": [f"reolink_monitor_{identity}"],
+            "manufacturer": "Reolink",
+            "name": camera.name,
+            "via_device": _BRIDGE_IDENTIFIER,
+        }
+        model = self._camera_models.get(identity)
+        if model is not None:
+            device["model"] = model
+        entities = (
+            (
+                "battery",
+                "Battery",
+                {
+                    "device_class": "battery",
+                    "state_class": "measurement",
+                    "unit_of_measurement": "%",
+                },
+            ),
+            (
+                "battery_status",
+                "Battery Status",
+                {"entity_category": "diagnostic", "icon": "mdi:battery-charging"},
+            ),
+            (
+                "recent_recordings",
+                "Recent Recordings",
+                {
+                    "entity_category": "diagnostic",
+                    "icon": "mdi:video-box",
+                    "json_attributes_topic": f"{state_root}/recent_recordings/attributes",
+                },
+            ),
+            (
+                "scraped_at_iso",
+                "Last Scraped",
+                {
+                    "device_class": "timestamp",
+                    "entity_category": "diagnostic",
+                },
+            ),
+            (
+                "scraped_at_unix",
+                "Last Scraped (Unix)",
+                {
+                    "unit_of_measurement": "s",
+                    "entity_category": "diagnostic",
+                },
+            ),
+            (
+                "camera_model",
+                "Model",
+                {"entity_category": "diagnostic", "icon": "mdi:cctv"},
+            ),
+        )
+        for key, label, attributes in entities:
+            topic = (
+                f"{self._config.discovery_prefix}/sensor/"
+                f"reolink_monitor/{identity}_{key}/config"
+            )
+            payload = {
+                "name": f"{camera.name} {label}",
+                "unique_id": f"reolink_monitor_{identity}_{key}",
+                "state_topic": f"{state_root}/{key}",
+                "availability_topic": availability_topic,
+                "payload_available": "online",
+                "payload_not_available": "offline",
+                "device": device,
+                "expire_after": self._config.poll_interval_seconds * 3,
+                **attributes,
+            }
+            self._publisher.publish(topic, json.dumps(payload), retain=True)
+
+        clock_topic = f"{state_root}/clock_offset"
+        self._publisher.publish(
+            f"{self._config.discovery_prefix}/sensor/"
+            f"reolink_monitor/{identity}_camera_clock_offset/config",
+            json.dumps(
+                {
+                    "name": f"{camera.name} Camera Clock Offset",
+                    "unique_id": f"reolink_monitor_{identity}_camera_clock_offset",
+                    "state_topic": clock_topic,
+                    "json_attributes_topic": f"{clock_topic}/attributes",
+                    "unit_of_measurement": "s",
+                    "entity_category": "diagnostic",
+                    "availability_topic": availability_topic,
+                    "payload_available": "online",
+                    "payload_not_available": "offline",
+                    "device": device,
+                    "expire_after": self._config.poll_interval_seconds * 3,
+                }
+            ),
+            retain=True,
+        )
+
     def publish_metadata(self) -> None:
         metadata_root = f"{self._config.state_prefix}/bridge/metadata"
         self._publisher.publish(
@@ -693,6 +710,16 @@ class BatteryMonitor:
             clock.timezone_setting or "unknown",
         )
         return clock
+
+    def _update_camera_model(self, camera: CameraConfig, reported_model: str) -> str | None:
+        identity = self._identity(camera)
+        model = None if reported_model in ("", UNKNOWN) else reported_model
+        if self._camera_models.get(identity) != model:
+            self._camera_models[identity] = model
+            self._publish_camera_discovery(camera)
+            if model is not None:
+                _LOGGER.info("%s camera model is %s", camera.name, model)
+        return model
 
     async def _connect_camera(self, camera: CameraConfig) -> CameraHost:
         kwargs: dict[str, object] = {"timeout": camera.connection_timeout_seconds}
@@ -773,6 +800,8 @@ class BatteryMonitor:
             percentage = host.battery_percentage(camera.channel)
             status_code = host.battery_status(camera.channel)
             state_root = self._camera_state_root(camera)
+            model = self._update_camera_model(camera, host.camera_model(camera.channel))
+            self._publisher.publish(f"{state_root}/model", model or "unknown", retain=False)
             if percentage is None:
                 battery = "unknown"
                 status = "unknown"
