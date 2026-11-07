@@ -83,6 +83,7 @@ The monitor publishes a **Reolink Bridge** device with a connectivity diagnostic
 - Camera Clock Offset (`sensor`, seconds): the measured difference between the camera's local clock and UTC, published at `camera/<camera_id>/state/clock_offset`. Its attributes are published at `camera/<camera_id>/state/clock_offset/attributes` and include the sampled camera time, server UTC time, and raw timezone setting reported by the camera.
 - Last scraped time (`sensor`, timestamp) and its Unix timestamp (`sensor`, seconds)
 - Camera model (`sensor`, diagnostic) published at `camera/<camera_id>/state/model`; `unknown` until the camera reports its model. The detected model is also set as the Home Assistant device model.
+- Camera UID, Hardware No, and Firmware Version (`sensor`, diagnostic) published at `camera/<camera_id>/info/uid`, `camera/<camera_id>/info/hardware_no`, and `camera/<camera_id>/info/firmware_version`; `unknown` until the camera reports them.
 
 Bridge topics are grouped under `<state_prefix>/bridge/`:
 

@@ -8,6 +8,7 @@
 - Generate release changelog entries from commit subjects when a version tag is pushed.
 - Build container images for both amd64 and arm64 platforms.
 - Publish each detected camera model to MQTT and as the Home Assistant device model and a diagnostic Model sensor.
+- Publish each camera's UID, hardware number, and firmware version under `camera/<camera_id>/info/` with matching diagnostic Home Assistant sensors.
 
 ### Documentation
 
