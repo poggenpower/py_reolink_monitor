@@ -71,6 +71,14 @@ class FakeHost:
         assert channel == 0
         return self.model
 
+    def camera_hardware_version(self, channel):
+        assert channel == 0
+        return "IPC_5MP"
+
+    def camera_sw_version(self, channel):
+        assert channel == 0
+        return "v3.1.0.1234_2026110501"
+
     async def logout(self):
         self.logged_out = True
 
@@ -251,6 +259,17 @@ async def test_poll_publishes_camera_model_and_adds_it_to_ha_device():
     assert ("reolink_monitor/camera/garden_ch0/state/model", "RLC-810A", False) in (
         publisher.messages
     )
+    assert ("reolink_monitor/camera/garden_ch0/info/uid", "CAMERA_UID_0", False) in (
+        publisher.messages
+    )
+    assert ("reolink_monitor/camera/garden_ch0/info/hardware_no", "IPC_5MP", False) in (
+        publisher.messages
+    )
+    assert (
+        "reolink_monitor/camera/garden_ch0/info/firmware_version",
+        "v3.1.0.1234_2026110501",
+        False,
+    ) in publisher.messages
     garden_devices = [
         json.loads(payload)["device"]
         for topic, payload, retained in publisher.messages
@@ -670,7 +689,7 @@ def test_discovery_announces_battery_entity_with_ha_device_metadata(caplog):
         monitor.publish_discovery()
 
     assert (
-        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (15 entities total)"
+        "Home Assistant MQTT discovery for Reolink Bridge and 1 camera devices (18 entities total)"
         in caplog.text
     )
     bridge_topic, bridge_payload, retained = publisher.messages[0]
@@ -799,11 +818,17 @@ def test_discovery_publishes_each_camera_under_its_own_ha_device():
         "scraped_at_iso",
         "scraped_at_unix",
         "camera_model",
+        "uid",
+        "hardware_no",
+        "firmware_version",
     ):
         topic = f"homeassistant/sensor/reolink_monitor/back_yard_ch1_{key}/config"
         assert topic in discovery
         assert discovery[topic]["state_topic"].startswith(
-            "reolink_monitor/camera/back_yard_ch1/state/"
+            (
+                "reolink_monitor/camera/back_yard_ch1/state/",
+                "reolink_monitor/camera/back_yard_ch1/info/",
+            )
         )
         assert discovery[topic]["device"]["via_device"] == "reolink_monitor_bridge"
 
