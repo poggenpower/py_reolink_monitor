@@ -90,6 +90,10 @@ class CameraHost(Protocol):
 
     def camera_model(self, channel: int | None) -> str: ...
 
+    def camera_hardware_version(self, channel: int | None) -> str: ...
+
+    def camera_sw_version(self, channel: int | None) -> str: ...
+
     def battery_percentage(self, channel: int) -> int | None: ...
 
     def battery_status(self, channel: int) -> int: ...
@@ -334,6 +338,10 @@ class HostFactory(Protocol):
     ) -> CameraHost: ...
 
 
+def _reported_value(value: str) -> str | None:
+    return None if value in ("", UNKNOWN) else value
+
+
 def _slug(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
 
@@ -380,6 +388,9 @@ class BatteryMonitor:
             f"{self._identity(camera)}/state"
         )
 
+    def _camera_info_root(self, camera: CameraConfig) -> str:
+        return f"{self._config.state_prefix}/camera/{self._identity(camera)}/info"
+
     def publish_discovery(self) -> None:
         bridge_identifier = _BRIDGE_IDENTIFIER
         bridge_root = f"{self._config.state_prefix}/bridge"
@@ -388,7 +399,7 @@ class BatteryMonitor:
             "Publishing Home Assistant MQTT discovery for Reolink Bridge and %d camera devices "
             "(%d entities total)",
             len(self._config.cameras),
-            len(self._config.cameras) * 7 + 8,
+            len(self._config.cameras) * 10 + 8,
         )
         bridge_topic = (
             f"{self._config.discovery_prefix}/binary_sensor/"
@@ -598,7 +609,24 @@ class BatteryMonitor:
                 {"entity_category": "diagnostic", "icon": "mdi:cctv"},
             ),
         )
-        for key, label, attributes in entities:
+        info_root = self._camera_info_root(camera)
+        info_entities = (
+            ("uid", "UID", {"entity_category": "diagnostic", "icon": "mdi:identifier"}),
+            (
+                "hardware_no",
+                "Hardware No",
+                {"entity_category": "diagnostic", "icon": "mdi:chip"},
+            ),
+            (
+                "firmware_version",
+                "Firmware Version",
+                {"entity_category": "diagnostic", "icon": "mdi:update"},
+            ),
+        )
+        for root, key, label, attributes in [
+            *((state_root, *entity) for entity in entities),
+            *((info_root, *entity) for entity in info_entities),
+        ]:
             topic = (
                 f"{self._config.discovery_prefix}/sensor/"
                 f"reolink_monitor/{identity}_{key}/config"
@@ -606,7 +634,7 @@ class BatteryMonitor:
             payload = {
                 "name": f"{camera.name} {label}",
                 "unique_id": f"reolink_monitor_{identity}_{key}",
-                "state_topic": f"{state_root}/{key}",
+                "state_topic": f"{root}/{key}",
                 "availability_topic": availability_topic,
                 "payload_available": "online",
                 "payload_not_available": "offline",
@@ -711,9 +739,21 @@ class BatteryMonitor:
         )
         return clock
 
+    def _publish_camera_info(self, camera: CameraConfig, host: CameraHost) -> None:
+        info_root = self._camera_info_root(camera)
+        values = {
+            "uid": host.camera_uid(camera.channel),
+            "hardware_no": host.camera_hardware_version(camera.channel),
+            "firmware_version": host.camera_sw_version(camera.channel),
+        }
+        for key, value in values.items():
+            self._publisher.publish(
+                f"{info_root}/{key}", _reported_value(value) or "unknown", retain=False
+            )
+
     def _update_camera_model(self, camera: CameraConfig, reported_model: str) -> str | None:
         identity = self._identity(camera)
-        model = None if reported_model in ("", UNKNOWN) else reported_model
+        model = _reported_value(reported_model)
         if self._camera_models.get(identity) != model:
             self._camera_models[identity] = model
             self._publish_camera_discovery(camera)
@@ -802,6 +842,7 @@ class BatteryMonitor:
             state_root = self._camera_state_root(camera)
             model = self._update_camera_model(camera, host.camera_model(camera.channel))
             self._publisher.publish(f"{state_root}/model", model or "unknown", retain=False)
+            self._publish_camera_info(camera, host)
             if percentage is None:
                 battery = "unknown"
                 status = "unknown"
